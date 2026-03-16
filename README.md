@@ -1,6 +1,98 @@
 # Vaquill Integrations
 
-MCP servers and integrations for [Vaquill AI](https://vaquill.com) — self-hosted legal research tools, chatbots, and platform connectors.
+MCP servers and integrations for [Vaquill AI](https://vaquill.ai) — self-hosted legal research tools, chatbots, and platform connectors.
+
+## Hosted MCP Endpoints
+
+These servers are hosted by Vaquill and available for anyone to connect:
+
+| Server | Endpoint | Auth |
+|--------|----------|------|
+| **CourtListener** | `https://courtlistener-mcp.vaquill.ai/mcp/` | None required |
+| **CanLII** | `https://canlii-mcp.vaquill.ai/mcp` | Bearer token required |
+
+## Connect to Your AI Tools
+
+### Claude Desktop / Claude Code
+
+Add to `~/.claude.json` or your project's `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "courtlistener": {
+      "url": "https://courtlistener-mcp.vaquill.ai/mcp/"
+    },
+    "canlii": {
+      "url": "https://canlii-mcp.vaquill.ai/mcp",
+      "headers": {
+        "Authorization": "Bearer YOUR_TOKEN"
+      }
+    }
+  }
+}
+```
+
+### Cursor
+
+Go to **Settings > MCP** and add:
+
+**CourtListener:**
+- Type: `streamableHttp`
+- URL: `https://courtlistener-mcp.vaquill.ai/mcp/`
+
+**CanLII:**
+- Type: `streamableHttp`
+- URL: `https://canlii-mcp.vaquill.ai/mcp`
+- Headers: `Authorization: Bearer YOUR_TOKEN`
+
+### Windsurf
+
+Add to your MCP config:
+
+```json
+{
+  "mcpServers": {
+    "courtlistener": {
+      "serverUrl": "https://courtlistener-mcp.vaquill.ai/mcp/"
+    },
+    "canlii": {
+      "serverUrl": "https://canlii-mcp.vaquill.ai/mcp",
+      "headers": {
+        "Authorization": "Bearer YOUR_TOKEN"
+      }
+    }
+  }
+}
+```
+
+### ChatGPT (via MCP Bridge)
+
+ChatGPT doesn't natively support MCP yet. Use an MCP-to-OpenAI bridge like [mcp-openai-bridge](https://github.com/nicobailon/mcp-openai-bridge):
+
+```bash
+pip install mcp-openai-bridge
+mcp-bridge --mcp-url https://courtlistener-mcp.vaquill.ai/mcp/ --port 8080
+```
+
+### Self-Hosting
+
+If you prefer to run your own instance:
+
+```bash
+git clone https://github.com/Vaquill-AI/integrations.git
+cd integrations
+
+# CourtListener
+cd courtlistener-mcp
+cp .env.example .env  # add your COURT_LISTENER_API_KEY
+docker-compose up -d  # runs on port 8000
+
+# CanLII
+cd ../canlii-mcp
+cp .env.example .env  # add your CANLII_API key
+docker build -t canlii-mcp . && docker run -p 3000:3000 --env-file .env canlii-mcp
+```
 
 ## MCP Servers
 
@@ -14,7 +106,14 @@ US federal and state court opinions, dockets, PACER data, and eCFR federal regul
 - **Upstream**: Forked from [Travis-Prall/court-listener-mcp](https://github.com/Travis-Prall/court-listener-mcp)
 - **API key**: Free from [courtlistener.com/api](https://www.courtlistener.com/api/)
 
-30+ tools: opinion search, docket search, citation lookup/verification, judge profiles, oral arguments, eCFR regulations.
+**19 tools:**
+
+| Category | Tools |
+|----------|-------|
+| Search | `search_opinions`, `search_dockets`, `search_dockets_with_documents`, `search_recap_documents`, `search_audio`, `search_people` |
+| Get by ID | `get_opinion`, `get_docket`, `get_audio`, `get_cluster`, `get_person`, `get_court` |
+| Citations | `citation_lookup_citation`, `citation_batch_lookup_citations`, `citation_verify_citation_format`, `citation_parse_citation_with_citeurl`, `citation_extract_citations_from_text`, `citation_enhanced_citation_lookup` |
+| System | `status` |
 
 ### canlii-mcp
 
@@ -26,9 +125,19 @@ Canadian federal and provincial court decisions and legislation via the [CanLII 
 - **Upstream**: Forked from [tomilashy/canlii-mcp](https://github.com/tomilashy/canlii-mcp)
 - **API key**: Apply at [canlii.org/en/api](https://www.canlii.org/en/api/)
 
-7 tools: case databases, case listing, case metadata, citation graph, legislation databases, legislation listing, legislation metadata. Bilingual (en/fr).
+**7 tools:**
 
-**Rate limits (CanLII API):** 1 concurrent request, 2 req/sec, **5,000 req/day hard cap**. The server enforces these automatically — requests exceeding the daily limit return an error without hitting the upstream API. Metadata only (no full document text).
+| Tool | Description |
+|------|-------------|
+| `list_case_databases` | List all courts and tribunals |
+| `list_cases` | Browse decisions from a specific court |
+| `get_case` | Case metadata (title, citation, date, keywords) |
+| `get_case_citations` | Citation graph — cited cases, citing cases, cited legislation |
+| `list_legislation_databases` | List all statute/regulation databases |
+| `list_legislation` | Browse statutes from a specific database |
+| `get_legislation` | Legislation metadata |
+
+Bilingual (English/French). **Rate limits (CanLII API):** 1 concurrent request, 2 req/sec, **5,000 req/day hard cap**. Metadata only (no full document text).
 
 ## Planned Integrations
 
