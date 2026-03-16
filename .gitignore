@@ -1,0 +1,68 @@
+# ── Secrets & API Keys (CRITICAL) ──────────────────────────────────────
+.env
+.env.*
+*.env
+!.env.example
+.env.local
+.env.*.local
+secrets/
+*.key
+*.pem
+*.cert
+*.crt
+*.p12
+*.pfx
+*.secret
+*credentials*
+*api_key*
+*apikey*
+*secret_key*
+
+# ── Python ─────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.venv/
+venv/
+env/
+.Python
+build/
+dist/
+*.egg-info/
+*.egg
+.coverage
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+uv.lock
+
+# ── Node / TypeScript ──────────────────────────────────────────────────
+node_modules/
+dist/
+.npm
+.yarn
+.pnpm-store/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ── Docker ─────────────────────────────────────────────────────────────
+docker-compose.override.yml
+.docker/
+
+# ── Logs ───────────────────────────────────────────────────────────────
+*.log
+*.logs
+logs/
+
+# ── OS / IDE ───────────────────────────────────────────────────────────
+.DS_Store
+._*
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
