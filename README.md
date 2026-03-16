@@ -26,7 +26,9 @@ Canadian federal and provincial court decisions and legislation via the [CanLII 
 - **Upstream**: Forked from [tomilashy/canlii-mcp](https://github.com/tomilashy/canlii-mcp)
 - **API key**: Apply at [canlii.org/en/api](https://www.canlii.org/en/api/)
 
-7 tools: case databases, case listing, case metadata, citation graph, legislation databases, legislation listing, legislation metadata. Bilingual (en/fr). Built-in rate limiting (5,000 req/day).
+7 tools: case databases, case listing, case metadata, citation graph, legislation databases, legislation listing, legislation metadata. Bilingual (en/fr).
+
+**Rate limits (CanLII API):** 1 concurrent request, 2 req/sec, **5,000 req/day hard cap**. The server enforces these automatically — requests exceeding the daily limit return an error without hitting the upstream API. Metadata only (no full document text).
 
 ## Planned Integrations
 
