@@ -36,6 +36,7 @@ dist/
 .mypy_cache/
 .ruff_cache/
 uv.lock
+!courtlistener-mcp/uv.lock
 
 # ── Node / TypeScript ──────────────────────────────────────────────────
 node_modules/
