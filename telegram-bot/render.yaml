@@ -1,0 +1,25 @@
+# Render.com deployment configuration for Vaquill Telegram Bot
+# Deploy as a background worker (polling mode, no HTTP port needed).
+services:
+  - type: worker
+    name: vaquill-telegram-bot
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: VAQUILL_API_KEY
+        sync: false
+      - key: VAQUILL_API_URL
+        value: https://api.vaquill.ai/api/v1
+      - key: VAQUILL_MODE
+        value: standard
+      - key: RATE_LIMIT_PER_USER_PER_DAY
+        value: 100
+      - key: RATE_LIMIT_PER_USER_PER_MINUTE
+        value: 5
+      - key: ENVIRONMENT
+        value: production
+      - key: LOG_LEVEL
+        value: INFO
