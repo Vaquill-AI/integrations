@@ -668,45 +668,28 @@ async def cmd_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 # ===================================================================
-# Message handler
+# Shared question processing
 # ===================================================================
 
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Route a plain-text message through the Vaquill API."""
-    chat_id = update.effective_chat.id
-    user_id = update.effective_user.id
-    user_text = (update.message.text or "").strip()
-
-    if not user_text:
-        return
-
-    # --- access control ---
-    if settings.allowed_users and user_id not in settings.allowed_users:
-        await update.message.reply_text("Sorry, you're not authorized to use this bot.")
-        return
-
-    # --- message length ---
-    if len(user_text) > settings.max_message_length:
-        await update.message.reply_text(
-            f"Your message is too long. Please keep it under {settings.max_message_length} characters."
-        )
-        return
-
-    # --- rate limit ---
-    allowed, err_msg, _ = await rate_limiter.check(user_id)
-    if not allowed:
-        await context.bot.send_message(chat_id=chat_id, text=err_msg)
-        return
-
-    # --- typing indicator ---
+async def _process_question(
+    chat_id: int,
+    user_id: int,
+    question: str,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    """
+    Send *question* to the Vaquill API, format the response, and deliver it
+    to *chat_id*.  Shared by both ``handle_message`` and the ``ask_*``
+    inline-keyboard callback so the logic lives in one place.
+    """
     await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
 
     try:
         history = _get_history(chat_id)
 
         response = await vaquill.ask(
-            question=user_text,
+            question=question,
             chat_history=history if history else None,
             sources=True,
             max_sources=settings.max_sources_per_response,
@@ -723,7 +706,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             return
 
         # Record history
-        _append_history(chat_id, "user", user_text)
+        _append_history(chat_id, "user", question)
         _append_history(chat_id, "assistant", answer)
 
         # --- table images ---
@@ -748,7 +731,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
         # --- send text chunks ---
         for i, chunk in enumerate(chunks):
-            # Attach source buttons to the last chunk (when no table images)
+            # Attach source buttons only to the last chunk (when no table images)
             kb = sources_kb if (i == len(chunks) - 1 and not table_images) else None
             try:
                 await context.bot.send_message(
@@ -831,6 +814,41 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 # ===================================================================
+# Message handler
+# ===================================================================
+
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Route a plain-text message through the Vaquill API."""
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+    user_text = (update.message.text or "").strip()
+
+    if not user_text:
+        return
+
+    # --- access control ---
+    if settings.allowed_users and user_id not in settings.allowed_users:
+        await update.message.reply_text("Sorry, you're not authorized to use this bot.")
+        return
+
+    # --- message length ---
+    if len(user_text) > settings.max_message_length:
+        await update.message.reply_text(
+            f"Your message is too long. Please keep it under {settings.max_message_length} characters."
+        )
+        return
+
+    # --- rate limit ---
+    allowed, err_msg, _ = await rate_limiter.check(user_id)
+    if not allowed:
+        await context.bot.send_message(chat_id=chat_id, text=err_msg)
+        return
+
+    await _process_question(chat_id, user_id, user_text, context)
+
+
+# ===================================================================
 # Callback query handler (inline keyboard buttons)
 # ===================================================================
 
@@ -864,69 +882,21 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         question = query.data.removeprefix("ask_")
         await query.message.delete()
 
+        chat_id = query.message.chat.id
+        user_id = query.from_user.id
+
         await context.bot.send_message(
-            chat_id=query.message.chat.id,
+            chat_id=chat_id,
             text=f"<i>You asked: {html.escape(question)}</i>",
             parse_mode=ParseMode.HTML,
         )
 
-        # Synthesise a fake Update-like flow
-        chat_id = query.message.chat.id
-        user_id = query.from_user.id
-
-        # Re-use the core handler logic inline
         allowed, err_msg, _ = await rate_limiter.check(user_id)
         if not allowed:
             await context.bot.send_message(chat_id=chat_id, text=err_msg)
             return
 
-        await context.bot.send_chat_action(chat_id=chat_id, action=ChatAction.TYPING)
-
-        try:
-            response = await vaquill.ask(
-                question=question,
-                chat_history=_get_history(chat_id) or None,
-                sources=True,
-                max_sources=settings.max_sources_per_response,
-            )
-            answer = vaquill.extract_answer(response)
-            sources = vaquill.extract_sources(response)
-
-            if answer:
-                _append_history(chat_id, "user", question)
-                _append_history(chat_id, "assistant", answer)
-
-                formatted = sanitize_for_telegram(answer)
-                sources_text = build_sources_text(sources)
-                sources_kb = build_sources_keyboard(sources)
-
-                full = formatted + sources_text
-                for chunk in chunk_message(full):
-                    try:
-                        await context.bot.send_message(
-                            chat_id=chat_id,
-                            text=chunk,
-                            parse_mode=ParseMode.HTML,
-                            disable_web_page_preview=True,
-                            reply_markup=sources_kb,
-                        )
-                    except BadRequest:
-                        await context.bot.send_message(
-                            chat_id=chat_id,
-                            text=strip_all_formatting(chunk),
-                            disable_web_page_preview=True,
-                        )
-            else:
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text="I couldn't get a response. Please try again.",
-                )
-        except Exception:
-            logger.exception("error handling button question")
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text="Something went wrong. Please try again later.",
-            )
+        await _process_question(chat_id, user_id, question, context)
 
 
 # ===================================================================

@@ -371,6 +371,14 @@ class VaquillTeamsBot(ActivityHandler):
         elif action == "feedback":
             reaction = value.get("reaction")
             if reaction:
+                user_id = turn_context.activity.from_property.id
+                conversation_id = turn_context.activity.conversation.id
+                logger.info(
+                    "Feedback received: user_id=%s, conversation_id=%s, feedback_type=%s",
+                    user_id,
+                    conversation_id,
+                    reaction,
+                )
                 confirmation_card = (
                     AdaptiveCardBuilder.create_feedback_confirmation_card(reaction)
                 )
