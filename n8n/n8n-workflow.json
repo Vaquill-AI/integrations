@@ -1,0 +1,436 @@
+{
+  "name": "Vaquill Legal Research - Google Sheets",
+  "nodes": [
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyMinute"
+            }
+          ]
+        },
+        "documentId": {
+          "__rl": true,
+          "mode": "list",
+          "value": ""
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "list",
+          "value": ""
+        },
+        "event": "rowAdded",
+        "options": {}
+      },
+      "id": "trigger-sheets",
+      "name": "New Question Added",
+      "type": "n8n-nodes-base.googleSheetsTrigger",
+      "typeVersion": 1,
+      "position": [200, 300],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "",
+          "name": "Google Sheets OAuth2"
+        }
+      },
+      "notes": "Triggers when a new row is added to the Google Sheet. Configure your spreadsheet and sheet name after importing."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "filter-unanswered",
+              "leftValue": "={{ $json.answer }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "empty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "filter-unanswered",
+      "name": "Filter Unanswered",
+      "type": "n8n-nodes-base.filter",
+      "typeVersion": 2,
+      "position": [420, 300],
+      "notes": "Only process rows where the answer column is empty."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.vaquill.ai/api/v1/ask",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"question\": \"{{ $json.question }}\",\n  \"mode\": \"standard\",\n  \"sources\": [\"corpus\"],\n  \"chatHistory\": []\n}",
+        "options": {
+          "timeout": 120000,
+          "response": {
+            "response": {
+              "fullResponse": false,
+              "responseFormat": "json"
+            }
+          },
+          "retry": {
+            "retry": {
+              "enabled": true,
+              "maxRetries": 2,
+              "retryInterval": 5000,
+              "retryOnStatusCodes": "429,502,503,504"
+            }
+          }
+        }
+      },
+      "id": "vaquill-ask",
+      "name": "Vaquill Ask API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [640, 300],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "",
+          "name": "Vaquill API Key"
+        }
+      },
+      "onError": "continueErrorOutput",
+      "notes": "Calls POST https://api.vaquill.ai/api/v1/ask with the question. Auth header is set via credentials (Header Auth with name 'Authorization' and value 'Bearer vq_key_...'). Retries on 429/5xx."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "check-success",
+              "leftValue": "={{ $json.statusCode }}",
+              "rightValue": 402,
+              "operator": {
+                "type": "number",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-credits",
+      "name": "Insufficient Credits?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [640, 540],
+      "notes": "Checks if the error was a 402 (insufficient credits). If so, stops the workflow to avoid wasting retries."
+    },
+    {
+      "parameters": {
+        "errorMessage": "=Vaquill API returned 402 - insufficient credits. Top up at https://app.vaquill.ai/billing. Last question: {{ $('Filter Unanswered').item.json.question }}"
+      },
+      "id": "stop-no-credits",
+      "name": "Stop - No Credits",
+      "type": "n8n-nodes-base.stopAndError",
+      "typeVersion": 1,
+      "position": [860, 620],
+      "notes": "Halts the workflow when the account has no remaining credits."
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "set-answer",
+              "name": "answer",
+              "value": "={{ $json.data.answer }}",
+              "type": "string"
+            },
+            {
+              "id": "set-sources",
+              "name": "sources",
+              "value": "={{ $json.data.sources ? $json.data.sources.map(s => s.title || s).join(', ') : '' }}",
+              "type": "string"
+            },
+            {
+              "id": "set-mode",
+              "name": "mode",
+              "value": "={{ $json.data.mode }}",
+              "type": "string"
+            },
+            {
+              "id": "set-interpreted",
+              "name": "questionInterpreted",
+              "value": "={{ $json.data.questionInterpreted }}",
+              "type": "string"
+            },
+            {
+              "id": "set-row",
+              "name": "rowNumber",
+              "value": "={{ $('Filter Unanswered').item.json.row_number }}",
+              "type": "number"
+            },
+            {
+              "id": "set-status",
+              "name": "status",
+              "value": "processed",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "extract-response",
+      "name": "Extract Response Fields",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [860, 300],
+      "notes": "Extracts answer, sources, and mode from the Vaquill API response into clean fields for writing back to the sheet."
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "documentId": {
+          "__rl": true,
+          "mode": "list",
+          "value": ""
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "list",
+          "value": ""
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "answer": "={{ $json.answer }}",
+            "sources": "={{ $json.sources }}",
+            "mode": "={{ $json.mode }}",
+            "status": "={{ $json.status }}"
+          },
+          "matchingColumns": ["row_number"],
+          "schema": [
+            {
+              "id": "question",
+              "displayName": "question",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string"
+            },
+            {
+              "id": "answer",
+              "displayName": "answer",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": false,
+              "display": true,
+              "type": "string"
+            },
+            {
+              "id": "sources",
+              "displayName": "sources",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": false,
+              "display": true,
+              "type": "string"
+            },
+            {
+              "id": "mode",
+              "displayName": "mode",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": false,
+              "display": true,
+              "type": "string"
+            },
+            {
+              "id": "status",
+              "displayName": "status",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": false,
+              "display": true,
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "write-answer",
+      "name": "Write Answer to Sheet",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [1080, 300],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "",
+          "name": "Google Sheets OAuth2"
+        }
+      },
+      "notes": "Updates the original row with the answer, sources, mode, and a 'processed' status."
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "documentId": {
+          "__rl": true,
+          "mode": "list",
+          "value": ""
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "list",
+          "value": ""
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "status": "error",
+            "answer": "=API error. Check logs or retry."
+          },
+          "matchingColumns": ["row_number"],
+          "schema": [
+            {
+              "id": "answer",
+              "displayName": "answer",
+              "type": "string"
+            },
+            {
+              "id": "status",
+              "displayName": "status",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "write-error",
+      "name": "Write Error to Sheet",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [860, 460],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "",
+          "name": "Google Sheets OAuth2"
+        }
+      },
+      "notes": "On non-402 API errors, marks the row as 'error' so the workflow can retry it later."
+    }
+  ],
+  "connections": {
+    "New Question Added": {
+      "main": [
+        [
+          {
+            "node": "Filter Unanswered",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter Unanswered": {
+      "main": [
+        [
+          {
+            "node": "Vaquill Ask API",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Vaquill Ask API": {
+      "main": [
+        [
+          {
+            "node": "Extract Response Fields",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Insufficient Credits?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Insufficient Credits?": {
+      "main": [
+        [
+          {
+            "node": "Stop - No Credits",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Write Error to Sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Response Fields": {
+      "main": [
+        [
+          {
+            "node": "Write Answer to Sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": ""
+  },
+  "staticData": null,
+  "tags": [
+    {
+      "name": "legal-research",
+      "id": "1"
+    },
+    {
+      "name": "vaquill",
+      "id": "2"
+    }
+  ],
+  "pinData": {},
+  "versionId": "1"
+}

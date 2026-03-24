@@ -1,0 +1,31 @@
+# Web framework
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+python-multipart==0.0.18
+
+# Twilio for WhatsApp integration
+twilio==9.4.4
+
+# Async HTTP client (Vaquill API)
+aiohttp==3.11.11
+certifi>=2024.2.2
+
+# Environment and config
+python-dotenv==1.0.1
+pydantic==2.10.4
+pydantic-settings==2.7.1
+
+# Structured logging
+structlog==24.4.0
+
+# Redis for rate limiting / sessions (optional)
+redis==5.2.1
+
+# In-memory caching fallback
+cachetools==5.5.1
+
+# Phone number validation
+phonenumbers==8.13.52
+
+# SSL certificates
+certifi>=2024.2.2

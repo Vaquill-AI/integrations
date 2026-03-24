@@ -1,0 +1,21 @@
+# Microsoft Bot Framework
+botbuilder-core==4.17.0
+botbuilder-schema==4.17.0
+botbuilder-integration-aiohttp==4.17.0
+
+# Web Framework
+flask==3.0.0
+aiohttp>=3.10,<4.0
+
+# HTTP Client (Vaquill client)
+certifi>=2024.0.0
+
+# Redis (optional, for distributed rate limiting)
+redis==5.0.8
+
+# Security
+cryptography>=41.0.0
+PyJWT>=2.8.0
+
+# Environment Variables
+python-dotenv==1.0.0

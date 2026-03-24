@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Vaquill Widget — Inline Embed Test Page</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #f9fafb;
+      color: #111827;
+    }
+
+    .container {
+      max-width: 800px;
+      margin: 0 auto;
+      padding: 48px 24px;
+    }
+
+    .hero {
+      background: white;
+      padding: 40px;
+      border-radius: 16px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+      margin-bottom: 32px;
+      text-align: center;
+    }
+
+    .hero h1 {
+      font-size: 2rem;
+      font-weight: 800;
+      background: linear-gradient(135deg, #1a56db, #3b82f6);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      margin-bottom: 12px;
+    }
+
+    .hero p {
+      font-size: 1rem;
+      color: #6b7280;
+      line-height: 1.7;
+    }
+
+    .section {
+      background: white;
+      padding: 28px 32px;
+      border-radius: 16px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+      margin-bottom: 24px;
+    }
+
+    .section h2 {
+      font-size: 1.125rem;
+      font-weight: 700;
+      color: #1f2937;
+      margin-bottom: 10px;
+    }
+
+    .section p {
+      font-size: 0.9375rem;
+      color: #4b5563;
+      line-height: 1.7;
+    }
+
+    code {
+      background: #f3f4f6;
+      border-radius: 4px;
+      padding: 2px 6px;
+      font-family: 'Fira Code', 'Cascadia Code', monospace;
+      font-size: 0.8125rem;
+      color: #1d4ed8;
+    }
+
+    .code-block {
+      background: #1f2937;
+      color: #d1fae5;
+      border-radius: 8px;
+      padding: 14px 18px;
+      font-family: 'Fira Code', 'Cascadia Code', monospace;
+      font-size: 0.8125rem;
+      overflow-x: auto;
+      margin: 10px 0;
+      line-height: 1.6;
+    }
+
+    footer {
+      text-align: center;
+      color: #9ca3af;
+      font-size: 0.875rem;
+      margin-top: 40px;
+    }
+  </style>
+</head>
+<body>
+
+<div class="container">
+  <div class="hero">
+    <h1>Vaquill Legal AI — Inline Embed</h1>
+    <p>The widget is embedded directly in the page below.</p>
+  </div>
+
+  <div class="section">
+    <h2>Usage</h2>
+    <p>
+      Place a <code>&lt;div id="vaquill-widget-embed"&gt;&lt;/div&gt;</code> where you
+      want the chat to appear, then include the embed script after it.
+    </p>
+    <div class="code-block">&lt;!-- 1. Placeholder --&gt;
+&lt;div id="vaquill-widget-embed"&gt;&lt;/div&gt;
+
+&lt;!-- 2. Script --&gt;
+&lt;script
+  src="script-inline-embed.js"
+  data-api-url="https://your-widget-host"
+&gt;&lt;/script&gt;</div>
+  </div>
+
+  <!-- The widget renders here -->
+  <div id="vaquill-widget-embed"></div>
+
+  <div class="section">
+    <h2>About Vaquill</h2>
+    <p>
+      Vaquill is a legal AI platform that searches across millions of Indian court
+      judgements and statutes to provide accurate, cited answers to legal questions.
+      All answers are grounded in primary sources and include direct PDF links.
+    </p>
+  </div>
+
+  <footer>
+    <p>Powered by <strong>Vaquill</strong> &mdash; Legal AI for Indian Law</p>
+    <p style="margin-top: 4px;">Vaquill provides legal information, not legal advice.</p>
+  </footer>
+</div>
+
+<!-- Inline embed script -->
+<script
+  src="../embed-scripts/script-inline-embed.js"
+  data-api-url="http://localhost:8000"
+  data-height="640px"
+></script>
+
+</body>
+</html>

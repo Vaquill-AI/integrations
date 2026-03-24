@@ -1,0 +1,7 @@
+python-telegram-bot==21.0.1
+python-dotenv==1.0.0
+aiohttp==3.9.5
+pydantic-settings==2.7.1
+pydantic==2.10.6
+certifi
+Pillow>=10.0.0

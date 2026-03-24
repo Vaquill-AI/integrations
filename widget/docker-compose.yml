@@ -1,0 +1,46 @@
+version: '3.8'
+
+services:
+  vaquill-widget:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    image: vaquill/widget:latest
+    container_name: vaquill-widget
+    restart: unless-stopped
+
+    # Port mapping: host:container
+    ports:
+      - "${HOST_PORT:-8000}:80"
+
+    # Environment variables loaded from .env file
+    environment:
+      # Vaquill API Configuration (required)
+      - VAQUILL_API_KEY=${VAQUILL_API_KEY}
+      - VAQUILL_API_URL=${VAQUILL_API_URL:-https://api.vaquill.ai/api/v1}
+
+      # Widget display settings
+      - WIDGET_TITLE=${WIDGET_TITLE:-Vaquill Legal AI}
+      - WIDGET_MODE=${WIDGET_MODE:-standard}
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-*}
+
+    # Health check
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:80/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+    # Labels for organization
+    labels:
+      - "com.vaquill.widget=true"
+      - "com.vaquill.version=1.0"
+      - "created_by=docker-compose"
+
+    # Logging configuration
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"

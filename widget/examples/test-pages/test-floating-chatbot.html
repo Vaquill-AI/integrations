@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Vaquill Widget — Floating Chatbot Test Page</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #f9fafb;
+      color: #111827;
+    }
+
+    .container {
+      max-width: 960px;
+      margin: 0 auto;
+      padding: 48px 24px 120px;
+    }
+
+    .hero {
+      background: white;
+      padding: 56px 40px;
+      border-radius: 16px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+      margin-bottom: 32px;
+      text-align: center;
+    }
+
+    .hero h1 {
+      font-size: 2.5rem;
+      font-weight: 800;
+      background: linear-gradient(135deg, #1a56db, #3b82f6);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      margin-bottom: 16px;
+    }
+
+    .hero p {
+      font-size: 1.125rem;
+      color: #6b7280;
+      max-width: 600px;
+      margin: 0 auto;
+      line-height: 1.7;
+    }
+
+    .callout {
+      background: linear-gradient(135deg, #1a56db, #3b82f6);
+      color: white;
+      padding: 40px;
+      border-radius: 16px;
+      text-align: center;
+      margin-bottom: 32px;
+    }
+
+    .callout h2 { font-size: 1.75rem; margin-bottom: 8px; }
+    .callout p  { font-size: 1rem; opacity: 0.9; }
+
+    .section {
+      background: white;
+      padding: 32px 36px;
+      border-radius: 16px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+      margin-bottom: 24px;
+    }
+
+    .section h2 {
+      font-size: 1.25rem;
+      font-weight: 700;
+      color: #1f2937;
+      margin-bottom: 12px;
+    }
+
+    .section p {
+      font-size: 0.9375rem;
+      color: #4b5563;
+      line-height: 1.7;
+      margin-bottom: 12px;
+    }
+
+    .section p:last-child { margin-bottom: 0; }
+
+    code {
+      background: #f3f4f6;
+      border-radius: 4px;
+      padding: 2px 6px;
+      font-family: 'Fira Code', 'Cascadia Code', monospace;
+      font-size: 0.8125rem;
+      color: #1d4ed8;
+    }
+
+    .code-block {
+      background: #1f2937;
+      color: #d1fae5;
+      border-radius: 8px;
+      padding: 16px 20px;
+      font-family: 'Fira Code', 'Cascadia Code', monospace;
+      font-size: 0.8125rem;
+      overflow-x: auto;
+      margin: 12px 0;
+      line-height: 1.6;
+    }
+
+    footer {
+      text-align: center;
+      color: #9ca3af;
+      font-size: 0.875rem;
+      margin-top: 48px;
+      padding: 24px;
+    }
+  </style>
+</head>
+<body>
+
+<div class="container">
+  <div class="hero">
+    <h1>Vaquill Legal AI</h1>
+    <p>
+      AI-powered legal research for Indian law. Click the floating button in the
+      bottom-right corner to start asking legal questions.
+    </p>
+  </div>
+
+  <div class="callout">
+    <h2>Try the Widget</h2>
+    <p>Click the floating button in the bottom-right corner to open the chat.</p>
+  </div>
+
+  <div class="section">
+    <h2>Integration — one script tag</h2>
+    <p>
+      Add the following snippet before the closing <code>&lt;/body&gt;</code> tag on
+      any page. The floating button appears automatically.
+    </p>
+    <div class="code-block">&lt;!-- Vaquill floating chatbot --&gt;
+&lt;script
+  src="https://your-widget-host/embed/script-floating-chatbot.js"
+  data-api-url="https://your-widget-host"
+  data-primary-color="#1a56db"
+&gt;&lt;/script&gt;</div>
+    <p>No other changes are required. The widget is self-contained and does not modify any existing page elements.</p>
+  </div>
+
+  <div class="section">
+    <h2>What Vaquill can answer</h2>
+    <p>Ask anything related to Indian law — case law, statutes, constitutional provisions, and more:</p>
+    <ul style="padding-left: 20px; margin-top: 8px; color: #374151; line-height: 2;">
+      <li>What is Section 302 of the Indian Penal Code?</li>
+      <li>Explain the scope of Article 21 after Maneka Gandhi v. Union of India.</li>
+      <li>What are the grounds for divorce under the Hindu Marriage Act, 1955?</li>
+      <li>Summarise the doctrine of promissory estoppel in Indian contract law.</li>
+    </ul>
+  </div>
+
+  <div class="section">
+    <h2>Configuration options</h2>
+    <p>Customise the widget via <code>data-*</code> attributes:</p>
+    <div class="code-block">data-api-url        → Backend URL (required in production)
+data-primary-color  → Brand hex colour   (default: #1a56db)
+data-button-size    → Button diameter    (default: 60px)
+data-chat-width     → Panel width        (default: 400px)
+data-chat-height    → Panel height       (default: 600px)</div>
+  </div>
+
+  <footer>
+    <p>Powered by <strong>Vaquill</strong> &mdash; Legal AI for Indian Law</p>
+    <p style="margin-top: 4px;">
+      Vaquill provides legal information, not legal advice.
+    </p>
+  </footer>
+</div>
+
+<!-- Load the floating chatbot script (points to local dev server) -->
+<script src="../embed-scripts/script-floating-chatbot.js"></script>
+
+</body>
+</html>
