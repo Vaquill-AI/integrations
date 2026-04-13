@@ -1,6 +1,5 @@
 """Configuration for the Vaquill Signal Bot."""
 
-import os
 from typing import List, Optional
 
 from pydantic import Field, field_validator

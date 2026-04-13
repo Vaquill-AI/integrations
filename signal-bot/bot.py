@@ -3,38 +3,66 @@
 Vaquill Legal AI -- Signal Bot.
 
 Answers legal questions via the Vaquill API, formats responses for Signal,
-shows case-law sources, and maintains per-user conversation history.
+shows case-law sources with PDF links, renders tables as images,
+and maintains per-user conversation history with LRU eviction.
 
 Uses the signalbot framework which connects to signal-cli-rest-api via WebSocket.
+The framework handles reconnection automatically with exponential backoff.
 """
 
 import logging
 import re
-from collections import defaultdict
-from typing import Any, Dict, List, Optional
+from io import BytesIO
+from typing import Any, Dict, List, Optional, Tuple
 
 from dotenv import load_dotenv
-from signalbot import Command, Config, Context, SignalBot, enable_console_logging
+from signalbot import Command, Config, ConnectionMode, Context, SignalBot, enable_console_logging
 
 from config import STARTER_QUESTIONS, SUCCESS_MESSAGES, get_settings
+from conversation_manager import ConversationManager
+from dedup import MessageDeduplicator
 from rate_limiter import RateLimiter
+from security_manager import mask_phone, sanitize_input, validate_message
 from vaquill_client import VaquillAPIError, VaquillClient
 
 # ---------------------------------------------------------------------------
-# Logging
+# Optional Pillow import (table -> image)
+# ---------------------------------------------------------------------------
+try:
+    from PIL import Image, ImageDraw, ImageFont
+
+    PILLOW_AVAILABLE = True
+except ImportError:
+    PILLOW_AVAILABLE = False
+
+# ---------------------------------------------------------------------------
+# Logging + Sentry
 # ---------------------------------------------------------------------------
 load_dotenv()
+settings = get_settings()
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO,
+    level=getattr(logging, settings.log_level.upper(), logging.INFO),
 )
 logger = logging.getLogger(__name__)
 
+if settings.sentry_dsn:
+    try:
+        import sentry_sdk
+
+        sentry_sdk.init(
+            dsn=settings.sentry_dsn,
+            environment=settings.environment,
+            traces_sample_rate=0.1,
+        )
+        logger.info("Sentry initialized")
+    except ImportError:
+        logger.warning("sentry_dsn configured but sentry-sdk not installed")
+
 # ---------------------------------------------------------------------------
-# Globals (initialised in main())
+# Globals
 # ---------------------------------------------------------------------------
-settings = get_settings()
 
 vaquill = VaquillClient(
     api_key=settings.vaquill_api_key,
@@ -48,11 +76,230 @@ rate_limiter = RateLimiter(
     minute_limit=settings.rate_limit_per_user_per_minute,
 )
 
-# Per-user conversation history: phone -> list of {role, content}
-chat_histories: Dict[str, List[Dict[str, str]]] = defaultdict(list)
+conversations = ConversationManager(
+    max_history_pairs=settings.max_conversation_history,
+    max_users=5000,
+    ttl_seconds=3600,
+)
+
+dedup = MessageDeduplicator(max_entries=2000)
 
 # Signal has no hard message limit but keep readable
 SIGNAL_MAX_MESSAGE_LENGTH = 4000
+
+
+# ===================================================================
+# Table extraction and image rendering (from telegram bot)
+# ===================================================================
+
+
+def extract_markdown_tables(
+    text: str,
+) -> List[Tuple[str, List[str], List[List[str]]]]:
+    """Extract markdown tables from text.
+
+    Returns a list of (original_table_text, headers, rows) tuples.
+    """
+    tables: List[Tuple[str, List[str], List[List[str]]]] = []
+    lines = text.split("\n")
+    current_lines: List[str] = []
+    headers: List[str] = []
+    rows: List[List[str]] = []
+    in_table = False
+
+    for line in lines:
+        is_table_line = "|" in line and (
+            line.strip().startswith("|") or line.strip().count("|") >= 2
+        )
+        is_separator = is_table_line and bool(
+            re.match(r"^\s*\|[-:\s|]+\|\s*$", line)
+        )
+
+        if is_table_line:
+            if not in_table:
+                in_table = True
+                current_lines = []
+                headers = []
+                rows = []
+            current_lines.append(line)
+            if not is_separator:
+                cells = [c.strip() for c in line.split("|") if c.strip()]
+                if not headers:
+                    headers = cells
+                else:
+                    rows.append(cells)
+        else:
+            if in_table and headers and rows:
+                tables.append(("\n".join(current_lines), headers, rows))
+            in_table = False
+            current_lines, headers, rows = [], [], []
+
+    if in_table and headers and rows:
+        tables.append(("\n".join(current_lines), headers, rows))
+
+    return tables
+
+
+def _clean_cell(text: str) -> str:
+    """Strip markdown formatting from a table cell."""
+    text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)
+    text = re.sub(r"__(.+?)__", r"\1", text)
+    text = re.sub(r"\*(.+?)\*", r"\1", text)
+    text = re.sub(r"_(.+?)_", r"\1", text)
+    text = re.sub(r"`(.+?)`", r"\1", text)
+    text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
+    return text.strip()
+
+
+def _wrap_text(text: str, font, max_width: int, draw) -> List[str]:
+    """Word-wrap text to fit within max_width pixels."""
+    if not text:
+        return [""]
+    words = text.split()
+    lines: List[str] = []
+    current = ""
+    for word in words:
+        test = f"{current} {word}".strip() if current else word
+        bbox = draw.textbbox((0, 0), test, font=font)
+        if bbox[2] - bbox[0] <= max_width:
+            current = test
+        else:
+            if current:
+                lines.append(current)
+            current = word
+    if current:
+        lines.append(current)
+    return lines or [""]
+
+
+def generate_table_image(
+    headers: List[str],
+    rows: List[List[str]],
+    max_width: int = 1200,
+    padding: int = 12,
+    font_size: int = 14,
+    header_font_size: int = 15,
+) -> Optional[BytesIO]:
+    """Render a markdown table as a PNG image."""
+    if not PILLOW_AVAILABLE or not headers or not rows:
+        return None
+
+    try:
+        font_paths = [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+            "/System/Library/Fonts/Helvetica.ttc",
+        ]
+        font = header_font = None
+        for path in font_paths:
+            try:
+                font = ImageFont.truetype(path, font_size)
+                header_font = ImageFont.truetype(path, header_font_size)
+                break
+            except Exception:
+                continue
+        if font is None:
+            font = ImageFont.load_default()
+            header_font = font
+
+        headers = [_clean_cell(h) for h in headers]
+        rows = [[_clean_cell(c) for c in row] for row in rows]
+
+        tmp = Image.new("RGB", (1, 1))
+        draw = ImageDraw.Draw(tmp)
+        bbox = draw.textbbox((0, 0), "Hg", font=font)
+        line_h = bbox[3] - bbox[1] + 4
+
+        num_cols = len(headers)
+        available = max_width - padding * 2
+        if num_cols == 2:
+            col_widths = [int(available * 0.30), int(available * 0.70)]
+        else:
+            col_widths = [available // num_cols] * num_cols
+
+        wrapped_headers = [
+            _wrap_text(h, header_font, col_widths[i] - padding * 2, draw)
+            for i, h in enumerate(headers)
+        ]
+        header_height = max(len(w) for w in wrapped_headers) * line_h + padding * 2
+
+        wrapped_rows: List[List[List[str]]] = []
+        row_heights: List[int] = []
+        for row in rows:
+            wr: List[List[str]] = []
+            max_lines = 1
+            for i, cell in enumerate(row):
+                if i < len(col_widths):
+                    w = _wrap_text(cell, font, col_widths[i] - padding * 2, draw)
+                    wr.append(w)
+                    max_lines = max(max_lines, len(w))
+            wrapped_rows.append(wr)
+            row_heights.append(max_lines * line_h + padding * 2)
+
+        total_w = sum(col_widths) + padding * 2
+        total_h = header_height + sum(row_heights) + padding * 2
+
+        img = Image.new("RGB", (total_w, total_h), color="#FFFFFF")
+        draw = ImageDraw.Draw(img)
+
+        header_bg, header_fg = "#1E40AF", "#FFFFFF"
+        even_bg, odd_bg = "#F8FAFC", "#FFFFFF"
+        cell_fg, border = "#1F2937", "#E5E7EB"
+        col1_bg = "#F0F9FF"
+
+        y = padding
+
+        # Header row
+        x = padding
+        draw.rectangle([x, y, total_w - padding, y + header_height], fill=header_bg)
+        for i, (wrapped, width) in enumerate(zip(wrapped_headers, col_widths)):
+            ty = y + padding
+            for ln in wrapped:
+                bb = draw.textbbox((0, 0), ln, font=header_font)
+                tx = x + (width - (bb[2] - bb[0])) // 2
+                draw.text((tx, ty), ln, fill=header_fg, font=header_font)
+                ty += line_h
+            x += width
+        y += header_height
+
+        # Data rows
+        for ri, (wr, rh) in enumerate(zip(wrapped_rows, row_heights)):
+            x = padding
+            bg = even_bg if ri % 2 == 0 else odd_bg
+            draw.rectangle([x, y, total_w - padding, y + rh], fill=bg)
+            for i, width in enumerate(col_widths):
+                if i == 0 and num_cols == 2:
+                    draw.rectangle([x, y, x + width, y + rh], fill=col1_bg)
+                if i < len(wr):
+                    ty = y + padding
+                    for ln in wr[i]:
+                        draw.text((x + padding, ty), ln, fill=cell_fg, font=font)
+                        ty += line_h
+                x += width
+            y += rh
+
+        # Borders
+        draw.rectangle(
+            [padding, padding, total_w - padding, total_h - padding],
+            outline=border, width=2,
+        )
+        y = padding + header_height
+        for rh in row_heights:
+            draw.line([(padding, y), (total_w - padding, y)], fill=border, width=1)
+            y += rh
+        x = padding
+        for width in col_widths[:-1]:
+            x += width
+            draw.line([(x, padding), (x, total_h - padding)], fill=border, width=1)
+
+        buf = BytesIO()
+        img.save(buf, format="PNG", optimize=True)
+        buf.seek(0)
+        return buf
+
+    except Exception:
+        logger.exception("table image generation failed")
+        return None
 
 
 # ===================================================================
@@ -64,7 +311,6 @@ def markdown_to_signal(text: str) -> str:
     """Convert markdown to Signal-compatible formatting.
 
     Signal supports: *bold*, _italic_, ~strikethrough~, ```code```, `inline`.
-    It does NOT support links, headers, or HTML.
     """
     if not text:
         return ""
@@ -132,7 +378,6 @@ def chunk_message(text: str, max_length: int = SIGNAL_MAX_MESSAGE_LENGTH) -> Lis
             break
 
         chunk = remaining[:max_length]
-        # Try to split at paragraph boundary
         last_para = chunk.rfind("\n\n")
         if last_para > max_length // 2:
             split_at = last_para
@@ -157,33 +402,18 @@ def chunk_message(text: str, max_length: int = SIGNAL_MAX_MESSAGE_LENGTH) -> Lis
 
 
 # ===================================================================
-# Chat history helpers
-# ===================================================================
-
-MAX_HISTORY = settings.max_conversation_history
-
-
-def _append_history(user_id: str, role: str, content: str) -> None:
-    """Append a message to the chat history, trimming to MAX_HISTORY pairs."""
-    chat_histories[user_id].append({"role": role, "content": content})
-    limit = MAX_HISTORY * 2
-    if len(chat_histories[user_id]) > limit:
-        chat_histories[user_id] = chat_histories[user_id][-limit:]
-
-
-def _get_history(user_id: str) -> List[Dict[str, str]]:
-    """Return the chat history for the Vaquill API."""
-    return list(chat_histories[user_id])
-
-
-def _clear_history(user_id: str) -> None:
-    """Wipe the chat history for a user."""
-    chat_histories.pop(user_id, None)
-
-
-# ===================================================================
 # Command: handle all incoming messages
 # ===================================================================
+
+# Commands (case-insensitive)
+_COMMANDS = frozenset({
+    "help", "/help",
+    "start", "/start",
+    "hi", "hello", "hey",
+    "examples", "/examples",
+    "stats", "/stats",
+    "clear", "/clear", "new", "new chat", "reset",
+})
 
 
 class LegalQueryCommand(Command):
@@ -196,10 +426,21 @@ class LegalQueryCommand(Command):
     async def handle(self, context: Context) -> None:
         """Process incoming message."""
         message = context.message
-        text = (message.text or "").strip()
+        raw_text = message.text or ""
         sender = message.source  # E.164 phone number
 
-        if not text or not sender:
+        if not raw_text.strip() or not sender:
+            return
+
+        # Deduplication (Signal can redeliver on reconnection)
+        if hasattr(message, "timestamp") and message.timestamp:
+            if dedup.is_duplicate(sender, message.timestamp):
+                logger.debug("duplicate message skipped: %s", mask_phone(sender))
+                return
+
+        # Sanitize input
+        text = sanitize_input(raw_text)
+        if not text:
             return
 
         # Access control
@@ -207,12 +448,11 @@ class LegalQueryCommand(Command):
             await context.send("Sorry, you're not authorized to use this bot.")
             return
 
-        # Message length check
-        if len(text) > settings.max_message_length:
-            await context.send(
-                f"Your message is too long. Please keep it under "
-                f"{settings.max_message_length} characters."
-            )
+        # Validate message
+        is_valid, error_msg = validate_message(text, settings.max_message_length)
+        if not is_valid:
+            if error_msg:
+                await context.send(error_msg)
             return
 
         # Handle commands
@@ -226,7 +466,7 @@ class LegalQueryCommand(Command):
             return
 
         if text_lower in {"start", "/start", "hi", "hello", "hey"}:
-            _clear_history(sender)
+            conversations.clear(sender)
             await context.send(SUCCESS_MESSAGES["welcome"])
             return
 
@@ -246,7 +486,7 @@ class LegalQueryCommand(Command):
             return
 
         if text_lower in {"clear", "/clear", "new", "new chat", "reset"}:
-            _clear_history(sender)
+            conversations.clear(sender)
             await context.send(
                 "Conversation cleared. Send me a new question to start fresh."
             )
@@ -265,6 +505,8 @@ class LegalQueryCommand(Command):
         self, context: Context, sender: str, question: str
     ) -> None:
         """Send question to Vaquill API and deliver formatted response."""
+        phone_masked = mask_phone(sender)
+
         # Show typing indicator
         try:
             await context.start_typing()
@@ -272,7 +514,7 @@ class LegalQueryCommand(Command):
             pass
 
         try:
-            history = _get_history(sender)
+            history = conversations.get(sender)
 
             response = await vaquill.ask(
                 question=question,
@@ -291,8 +533,16 @@ class LegalQueryCommand(Command):
                 return
 
             # Record history
-            _append_history(sender, "user", question)
-            _append_history(sender, "assistant", answer)
+            conversations.append(sender, "user", question)
+            conversations.append(sender, "assistant", answer)
+
+            # Generate table images before stripping markdown
+            table_images: List[BytesIO] = []
+            if PILLOW_AVAILABLE:
+                for _, hdrs, rws in extract_markdown_tables(answer):
+                    img = generate_table_image(hdrs, rws)
+                    if img:
+                        table_images.append(img)
 
             # Format for Signal
             formatted = markdown_to_signal(answer)
@@ -305,13 +555,26 @@ class LegalQueryCommand(Command):
             full = formatted + sources_text + footer
             chunks = chunk_message(full)
 
+            # Send text chunks
             for chunk in chunks:
                 await context.send(chunk)
 
+            # Send table images as attachments
+            import base64
+
+            for idx, timg in enumerate(table_images):
+                try:
+                    img_b64 = base64.b64encode(timg.read()).decode("utf-8")
+                    caption = f"Table {idx + 1}" if len(table_images) > 1 else "Table"
+                    await context.send(caption, base64_attachments=[img_b64])
+                except Exception:
+                    logger.debug("failed to send table image %d", idx + 1)
+
             logger.info(
-                "message handled: user=%s sources=%d chunks=%d",
-                sender[:6] + "****",
+                "message handled: user=%s sources=%d tables=%d chunks=%d",
+                phone_masked,
                 len(sources),
+                len(table_images),
                 len(chunks),
             )
 
@@ -333,8 +596,7 @@ class LegalQueryCommand(Command):
                 )
         except Exception:
             logger.exception(
-                "unexpected error handling message for user=%s",
-                sender[:6] + "****",
+                "unexpected error handling message for user=%s", phone_masked,
             )
             await context.send(
                 "An unexpected error occurred. Please try again later."
@@ -378,17 +640,20 @@ def main() -> None:
     config = Config(
         signal_service=settings.signal_service_url,
         phone_number=settings.signal_phone_number,
+        connection_mode=ConnectionMode.HTTP_ONLY,  # Internal Docker network, no TLS
+        retry_interval=5,  # Seconds between reconnection attempts
     )
 
     bot = SignalBot(config)
 
-    # Register the catch-all command for all contacts and groups
-    bot.register(LegalQueryCommand())
+    # Register the catch-all command for private messages only (no groups)
+    bot.register(LegalQueryCommand(), contacts=True, groups=False)
 
     logger.info(
-        "Vaquill Signal bot starting (phone=%s, mode=%s)",
-        settings.signal_phone_number[:6] + "****",
+        "Vaquill Signal bot starting (phone=%s, mode=%s, pillow=%s)",
+        mask_phone(settings.signal_phone_number),
         settings.vaquill_mode,
+        PILLOW_AVAILABLE,
     )
     bot.start()
 

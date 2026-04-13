@@ -1,5 +1,5 @@
 """
-In-memory rate limiter for the Vaquill Signal Bot.
+In-memory rate limiter with automatic stale entry cleanup.
 
 No external dependency (Redis) required. Each bot process keeps its own
 counters, which is fine for a single-instance deployment.
@@ -28,6 +28,7 @@ class RateLimiter:
                 "minute_ts": datetime.now(),
             }
         )
+        self._last_cleanup = datetime.now()
 
     async def check(self, user_id: str) -> Tuple[bool, Optional[str], Dict[str, Any]]:
         """
@@ -73,6 +74,10 @@ class RateLimiter:
             bucket["daily_count"] += 1
             bucket["minute_count"] += 1
 
+            # Periodic cleanup (every hour)
+            if (now - self._last_cleanup).total_seconds() > 3600:
+                self._cleanup_stale(now)
+
             return True, None, self._stats(bucket)
 
     async def get_stats(self, user_id: str) -> Dict[str, Any]:
@@ -86,6 +91,17 @@ class RateLimiter:
                 bucket["daily_date"] = now.date()
 
             return self._stats(bucket)
+
+    def _cleanup_stale(self, now: datetime) -> None:
+        """Remove entries older than 2 days to prevent memory leaks."""
+        cutoff = now.date() - timedelta(days=2)
+        stale_keys = [
+            k for k, v in self._buckets.items()
+            if v["daily_date"] < cutoff
+        ]
+        for k in stale_keys:
+            del self._buckets[k]
+        self._last_cleanup = now
 
     def _stats(self, bucket: Dict[str, Any]) -> Dict[str, Any]:
         return {
