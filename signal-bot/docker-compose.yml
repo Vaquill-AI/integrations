@@ -1,0 +1,38 @@
+version: "3.8"
+
+services:
+  # signal-cli-rest-api: bridges Signal network to HTTP/WebSocket
+  # Must run in json-rpc mode for signalbot WebSocket connection.
+  signal-cli:
+    image: bbernhard/signal-cli-rest-api:latest
+    container_name: signal-cli
+    restart: unless-stopped
+    environment:
+      - MODE=json-rpc
+      - AUTO_RECEIVE_SCHEDULE=0 22 * * *  # Daily cleanup receive at 10pm
+    ports:
+      - "8080:8080"  # REST API (keep internal in production)
+    volumes:
+      - signal-cli-data:/home/.local/share/signal-cli
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/v1/about"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Vaquill Signal bot: connects to signal-cli via WebSocket
+  signal-bot:
+    build: .
+    container_name: vaquill-signal-bot
+    restart: unless-stopped
+    depends_on:
+      signal-cli:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      - SIGNAL_SERVICE_URL=http://signal-cli:8080
+
+volumes:
+  signal-cli-data:
+    driver: local
