@@ -632,8 +632,13 @@ class LegalQueryCommand(Command):
     async def _send_source_pdfs(
         self, context: Context, sources: List[Dict[str, Any]]
     ) -> None:
-        """Download source PDFs and send as Signal attachments."""
+        """Download source PDFs and send as named Signal attachments.
+
+        Uses the signal-cli-rest-api data URI format to set filenames:
+        data:application/pdf;filename=Case_Name.pdf;base64,<data>
+        """
         import base64
+        import re
 
         import aiohttp
 
@@ -646,6 +651,15 @@ class LegalQueryCommand(Command):
             case_name = src.get("caseName") or src.get("case_name") or "Judgment"
             citation = src.get("citation") or ""
             idx = src.get("sourceIndex") or src.get("source_index") or pdf_count + 1
+
+            # Build a clean filename: "[1] Case Name (Citation).pdf"
+            filename = f"[{idx}] {case_name[:50]}"
+            if citation:
+                filename += f" ({citation})"
+            # Sanitize filename: remove chars unsafe for filesystems
+            filename = re.sub(r'[<>:"/\\|?*]', "", filename).strip()
+            filename += ".pdf"
+
             caption = f"[{idx}] {case_name}"
             if citation:
                 caption += f" ({citation})"
@@ -656,9 +670,13 @@ class LegalQueryCommand(Command):
                         if resp.status == 200:
                             pdf_bytes = await resp.read()
                             pdf_b64 = base64.b64encode(pdf_bytes).decode("utf-8")
+                            # Use data URI format with filename for signal-cli
+                            named_attachment = (
+                                f"data:application/pdf;filename={filename};base64,{pdf_b64}"
+                            )
                             await context.send(
                                 caption[:200],
-                                base64_attachments=[pdf_b64],
+                                base64_attachments=[named_attachment],
                                 text_mode="styled",
                             )
                             pdf_count += 1
