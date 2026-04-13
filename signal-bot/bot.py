@@ -308,19 +308,23 @@ def generate_table_image(
 
 
 def markdown_to_signal(text: str) -> str:
-    """Convert markdown to Signal-compatible formatting.
+    """Convert markdown to Signal styled text format.
 
-    Signal supports: *bold*, _italic_, ~strikethrough~, ```code```, `inline`.
+    Signal uses text_mode="styled" with:
+      **bold**, *italic*, ~strikethrough~, ||spoiler||, `code`, ```block```
+    Note: **double asterisks** for bold, *single* for italic.
     """
     if not text:
         return ""
 
     # Headers -> bold text
-    text = re.sub(r"^#{1,6}\s*(.+)$", r"*\1*", text, flags=re.MULTILINE)
+    text = re.sub(r"^#{1,6}\s*(.+)$", r"**\1**", text, flags=re.MULTILINE)
 
-    # **bold** or __bold__ -> *bold* (Signal uses single asterisk)
-    text = re.sub(r"\*\*(.+?)\*\*", r"*\1*", text)
-    text = re.sub(r"__(.+?)__", r"*\1*", text)
+    # __bold__ -> **bold** (Signal uses double asterisk for bold)
+    text = re.sub(r"__(.+?)__", r"**\1**", text)
+
+    # _italic_ stays as *italic* (single asterisk)
+    # **bold** stays as **bold** (already correct)
 
     # Remove markdown links, keep text: [text](url) -> text (url)
     text = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"\1 (\2)", text)
@@ -342,7 +346,7 @@ def build_sources_text(sources: List[Dict[str, Any]]) -> str:
     if not sources:
         return ""
 
-    lines = ["\n\n----------\n*Sources:*"]
+    lines = ["\n\n----------\n**Sources:**"]
     for i, src in enumerate(sources[:settings.max_sources_per_response], 1):
         case_name = src.get("caseName") or src.get("case_name") or "Source"
         citation = src.get("citation") or ""
@@ -357,9 +361,9 @@ def build_sources_text(sources: List[Dict[str, Any]]) -> str:
 
         label = " ".join(parts)
         if pdf_url:
-            lines.append(f"[{i}] *{label}*\n    {pdf_url}")
+            lines.append(f"[{i}] **{label}**\n    {pdf_url}")
         else:
-            lines.append(f"[{i}] *{label}*")
+            lines.append(f"[{i}] **{label}**")
 
     return "\n".join(lines)
 
@@ -399,6 +403,16 @@ def chunk_message(text: str, max_length: int = SIGNAL_MAX_MESSAGE_LENGTH) -> Lis
         remaining = remaining[split_at:].strip()
 
     return chunks
+
+
+# ===================================================================
+# Styled send helper
+# ===================================================================
+
+
+async def send(context: Context, text: str, **kwargs) -> None:
+    """Send a message with styled text formatting enabled."""
+    await context.send(text, text_mode="styled", **kwargs)
 
 
 # ===================================================================
@@ -445,14 +459,14 @@ class LegalQueryCommand(Command):
 
         # Access control
         if settings.allowed_users and sender not in settings.allowed_users:
-            await context.send("Sorry, you're not authorized to use this bot.")
+            await send(context, "Sorry, you're not authorized to use this bot.")
             return
 
         # Validate message
         is_valid, error_msg = validate_message(text, settings.max_message_length)
         if not is_valid:
             if error_msg:
-                await context.send(error_msg)
+                await send(context, error_msg)
             return
 
         # Handle commands
@@ -462,12 +476,12 @@ class LegalQueryCommand(Command):
             help_text = SUCCESS_MESSAGES["help"].format(
                 daily_limit=settings.rate_limit_per_user_per_day,
             )
-            await context.send(help_text)
+            await send(context, help_text)
             return
 
         if text_lower in {"start", "/start", "hi", "hello", "hey"}:
             conversations.clear(sender)
-            await context.send(SUCCESS_MESSAGES["welcome"])
+            await send(context, SUCCESS_MESSAGES["welcome"])
             return
 
         if text_lower in {"examples", "/examples"}:
@@ -477,17 +491,17 @@ class LegalQueryCommand(Command):
         if text_lower in {"stats", "/stats"}:
             stats = await rate_limiter.get_stats(sender)
             stats_text = (
-                "*Your Usage Statistics*\n\n"
+                "**Your Usage Statistics**\n\n"
                 f"Today's usage: {stats['daily_used']} / {stats['daily_limit']}\n"
                 f"Remaining today: {stats['daily_remaining']}\n\n"
                 f"Per-minute limit: {stats['minute_limit']} messages"
             )
-            await context.send(stats_text)
+            await send(context, stats_text)
             return
 
         if text_lower in {"clear", "/clear", "new", "new chat", "reset"}:
             conversations.clear(sender)
-            await context.send(
+            await send(context,
                 "Conversation cleared. Send me a new question to start fresh."
             )
             return
@@ -495,7 +509,7 @@ class LegalQueryCommand(Command):
         # Rate limit check
         allowed, err_msg, _ = await rate_limiter.check(sender)
         if not allowed:
-            await context.send(err_msg)
+            await send(context, err_msg)
             return
 
         # Process as legal question
@@ -507,7 +521,12 @@ class LegalQueryCommand(Command):
         """Send question to Vaquill API and deliver formatted response."""
         phone_masked = mask_phone(sender)
 
-        # Show typing indicator
+        # Send "Researching..." indicator (typing indicators are unreliable in Signal)
+        try:
+            await send(context, "*Researching your question. This may take up to a minute...*")
+        except Exception:
+            pass
+
         try:
             await context.start_typing()
         except Exception:
@@ -527,7 +546,7 @@ class LegalQueryCommand(Command):
             sources = vaquill.extract_sources(response)
 
             if not answer:
-                await context.send(
+                await send(context,
                     "I couldn't get a response. Please try again."
                 )
                 return
@@ -548,16 +567,16 @@ class LegalQueryCommand(Command):
             formatted = markdown_to_signal(answer)
             sources_text = build_sources_text(sources)
             footer = (
-                "\n\n_For acts, citation graphs, translations and more: "
-                "https://app.vaquill.ai_"
+                "\n\n*For acts, citation graphs, translations and more:* "
+                "https://app.vaquill.ai"
             )
 
             full = formatted + sources_text + footer
             chunks = chunk_message(full)
 
-            # Send text chunks
+            # Send text chunks (styled formatting)
             for chunk in chunks:
-                await context.send(chunk)
+                await send(context, chunk)
 
             # Send table images as attachments
             import base64
@@ -570,6 +589,9 @@ class LegalQueryCommand(Command):
                 except Exception:
                     logger.debug("failed to send table image %d", idx + 1)
 
+            # Send source PDFs as document attachments (download and forward)
+            await self._send_source_pdfs(context, sources)
+
             logger.info(
                 "message handled: user=%s sources=%d tables=%d chunks=%d",
                 phone_masked,
@@ -581,24 +603,24 @@ class LegalQueryCommand(Command):
         except VaquillAPIError as e:
             logger.error("Vaquill API error: %s", e)
             if e.status_code == 402:
-                await context.send(
+                await send(context,
                     "The bot's API credits are exhausted. "
                     "Please contact the administrator."
                 )
             elif e.status_code == 429:
-                await context.send(
+                await send(context,
                     "The API is rate-limited right now. "
                     "Please wait a moment and try again."
                 )
             else:
-                await context.send(
+                await send(context,
                     "Something went wrong. Please try again later."
                 )
         except Exception:
             logger.exception(
                 "unexpected error handling message for user=%s", phone_masked,
             )
-            await context.send(
+            await send(context,
                 "An unexpected error occurred. Please try again later."
             )
         finally:
@@ -607,18 +629,54 @@ class LegalQueryCommand(Command):
             except Exception:
                 pass
 
+    async def _send_source_pdfs(
+        self, context: Context, sources: List[Dict[str, Any]]
+    ) -> None:
+        """Download source PDFs and send as Signal attachments."""
+        import base64
+
+        import aiohttp
+
+        pdf_count = 0
+        for src in sources[:3]:  # Max 3 PDFs
+            pdf_url = src.get("pdfUrl") or src.get("pdf_url") or ""
+            if not pdf_url:
+                continue
+
+            case_name = src.get("caseName") or src.get("case_name") or "Judgment"
+            citation = src.get("citation") or ""
+            idx = src.get("sourceIndex") or src.get("source_index") or pdf_count + 1
+            caption = f"[{idx}] {case_name}"
+            if citation:
+                caption += f" ({citation})"
+
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(pdf_url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                        if resp.status == 200:
+                            pdf_bytes = await resp.read()
+                            pdf_b64 = base64.b64encode(pdf_bytes).decode("utf-8")
+                            await context.send(
+                                caption[:200],
+                                base64_attachments=[pdf_b64],
+                                text_mode="styled",
+                            )
+                            pdf_count += 1
+            except Exception:
+                logger.debug("failed to download/send PDF: %s", pdf_url[:60])
+
     async def _send_examples(self, context: Context) -> None:
         """Send example questions grouped by category."""
-        lines = ["*Example Questions:*\n"]
+        lines = ["**Example Questions:**\n"]
 
         for category, questions in STARTER_QUESTIONS.items():
             cat_name = category.replace("_", " ").title()
-            lines.append(f"\n*{cat_name}:*")
+            lines.append(f"\n**{cat_name}:**")
             for i, q in enumerate(questions, 1):
                 lines.append(f"  {i}. {q}")
 
         lines.append("\nJust copy and send any question, or type your own.")
-        await context.send("\n".join(lines))
+        await send(context, "\n".join(lines))
 
 
 # ===================================================================
