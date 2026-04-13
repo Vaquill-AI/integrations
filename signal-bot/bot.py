@@ -638,7 +638,7 @@ def main() -> None:
     enable_console_logging(logging.INFO)
 
     config = Config(
-        signal_service=settings.signal_service_url,
+        signal_service=settings.signal_service_url.replace("http://", "").replace("https://", ""),
         phone_number=settings.signal_phone_number,
         connection_mode=ConnectionMode.HTTP_ONLY,  # Internal Docker network, no TLS
         retry_interval=5,  # Seconds between reconnection attempts
