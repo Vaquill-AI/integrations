@@ -59,46 +59,14 @@ Pre-built workflow templates for batch legal research via spreadsheets.
 
 ## MCP Servers
 
-Hosted MCP endpoints for AI tool integration:
+Both MCP servers now live in their own dedicated repositories. Each ships with bring-your-own-key (BYOK) auth so you can use Vaquill's hosted endpoint with your own API key (we never see or store it).
 
-| Server | Endpoint | Auth |
-|--------|----------|------|
-| **CourtListener** | `https://courtlistener-mcp.vaquill.ai/mcp/` | None required |
-| **CanLII** | `https://canlii-mcp.vaquill.ai/mcp` | Bearer token required |
+| Server | Repo | Hosted endpoint |
+|--------|------|-----------------|
+| **CourtListener** (US) | [Vaquill-AI/courtlistener-mcp](https://github.com/Vaquill-AI/courtlistener-mcp) | `https://courtlistener-mcp.vaquill.ai/mcp/` |
+| **CanLII** (Canada) | [Vaquill-AI/canlii-mcp](https://github.com/Vaquill-AI/canlii-mcp) | `https://canlii-mcp.vaquill.ai/mcp` |
 
-### Claude Desktop / Claude Code
-
-```json
-{
-  "mcpServers": {
-    "courtlistener": {
-      "url": "https://courtlistener-mcp.vaquill.ai/mcp/"
-    },
-    "canlii": {
-      "url": "https://canlii-mcp.vaquill.ai/mcp",
-      "headers": { "Authorization": "Bearer YOUR_TOKEN" }
-    }
-  }
-}
-```
-
-### courtlistener-mcp
-
-US federal and state court opinions, dockets, PACER data, and eCFR federal regulations via the [CourtListener API v4](https://www.courtlistener.com/api/).
-
-- **Language**: Python (FastMCP)
-- **Transport**: `streamable_http` at `/mcp/` (default), `sse`, `stdio`
-- **Docker**: `docker-compose up -d` (port 8000)
-- **API key**: Free from [courtlistener.com/api](https://www.courtlistener.com/api/)
-
-### canlii-mcp
-
-Canadian federal and provincial court decisions and legislation via the [CanLII API](https://www.canlii.org/en/api/).
-
-- **Language**: TypeScript (MCP SDK + Hono)
-- **Transport**: `streamable_http` at `/mcp` (stateless), `stdio`
-- **Docker**: `docker run -e CANLII_API=key -p 3000:3000` (port 3000)
-- **API key**: Apply at [canlii.org/en/api](https://www.canlii.org/en/api/)
+See each repo's README for client setup (Claude Desktop, Cursor, VS Code, Windsurf, etc.) and self-hosting instructions.
 
 ## Vaquill API
 
