@@ -1,0 +1,224 @@
+/**
+ * Voice Mode Streaming Endpoint with Progressive Updates
+ * Sends updates as events become available: STT → AI → TTS
+ * Uses Server-Sent Events (SSE) for progressive caption display
+ *
+ * Session Management:
+ * - Accepts session_id via x-session-id header (from client)
+ * - Creates new session only if not provided
+ * - Returns session_id in response for client-side storage
+ */
+
+import { NextRequest } from 'next/server';
+import { transcribeFromBuffer } from '@/lib/audio/stt';
+import { getCompletion } from '@/lib/ai/completion';
+import { textToSpeechStream } from '@/lib/audio/tts';
+import { vaquillClient } from '@/lib/ai/vaquill-client';
+import { VAQUILL_CONFIG, OPENAI_CONFIG, TTS_CONFIG } from '@/config/constants';
+import { getTranslations } from '@/config/i18n';
+import OpenAI from 'openai';
+
+export const runtime = 'nodejs';
+export const maxDuration = 60;
+
+interface Message {
+  role: 'system' | 'user' | 'assistant';
+  content: string;
+}
+
+export async function POST(request: NextRequest) {
+  const startTime = performance.now();
+  const timings: Record<string, string> = {};
+
+  // Create streaming response with Server-Sent Events
+  const stream = new ReadableStream({
+    async start(controller) {
+      const encoder = new TextEncoder();
+
+      // Helper to send SSE event
+      const sendEvent = (event: string, data: any) => {
+        const message = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+        controller.enqueue(encoder.encode(message));
+        console.log(`[SSE] Sent event: ${event}`, data);
+      };
+
+      try {
+        // 1. Parse multipart form data
+        const parseStart = performance.now();
+        const formData = await request.formData();
+        const audioFile = formData.get('audio') as File;
+        const conversationHeader = request.headers.get('conversation') || 'W10=';
+
+        // Accept session_id from client to maintain conversation continuity
+        const clientSessionId = request.headers.get('x-session-id');
+        timings.parse = ((performance.now() - parseStart) / 1000).toFixed(3);
+
+        if (!audioFile) {
+          sendEvent('error', { message: 'No audio file provided' });
+          controller.close();
+          return;
+        }
+
+        console.log('[INFERENCE-STREAM] Processing audio:', {
+          size: audioFile.size,
+          type: audioFile.type,
+          parseTime: `${timings.parse}s`,
+          clientSessionId: clientSessionId ? 'provided' : 'not provided'
+        });
+
+        // 2. Speech-to-Text & Session Creation in Parallel
+        const sttStart = performance.now();
+        const bufferStart = performance.now();
+        const audioBuffer = Buffer.from(await audioFile.arrayBuffer());
+        timings.buffer = ((performance.now() - bufferStart) / 1000).toFixed(3);
+
+        let sessionPromise: Promise<{session_id: string}> | undefined;
+        let sessionCreated = false;
+
+        if (VAQUILL_CONFIG.useVaquill) {
+          // Use client-provided session_id if available, otherwise create new
+          if (clientSessionId) {
+            console.log('[INFERENCE-STREAM] Using client-provided session:', clientSessionId);
+            sessionPromise = Promise.resolve({ session_id: clientSessionId });
+          } else {
+            console.log('[INFERENCE-STREAM] Creating new session (no client session provided)');
+            const sessionStart = performance.now();
+            sessionCreated = true;
+            sessionPromise = vaquillClient.createConversation().then(conv => {
+              timings.create_session = ((performance.now() - sessionStart) / 1000).toFixed(3);
+              return conv;
+            });
+          }
+        }
+
+        const transcribeStart = performance.now();
+        const transcript = await transcribeFromBuffer(audioBuffer, audioFile.type);
+        timings.transcribe = ((performance.now() - transcribeStart) / 1000).toFixed(3);
+
+        const sttDuration = ((performance.now() - sttStart) / 1000).toFixed(3);
+        timings.stt_total = sttDuration;
+
+        if (!transcript || transcript === '[Speech recognition unavailable]') {
+          sendEvent('error', { message: 'Speech recognition failed' });
+          controller.close();
+          return;
+        }
+
+        // ✅ IMMEDIATE UPDATE 1: Send transcript as soon as STT completes
+        sendEvent('transcript', {
+          text: transcript,
+          timing: sttDuration
+        });
+
+        // 3. Decode conversation history
+        const decodeStart = performance.now();
+        const conversationJson = Buffer.from(conversationHeader, 'base64').toString('utf-8');
+        const conversation: Message[] = JSON.parse(conversationJson);
+
+        if (conversation.length === 0) {
+          const t = getTranslations();
+          conversation.push({
+            role: 'system',
+            content: 'You are a helpful AI assistant. Keep responses brief and conversational for voice interaction.',
+          });
+        }
+
+        conversation.push({
+          role: 'user',
+          content: transcript,
+        });
+        timings.decode = ((performance.now() - decodeStart) / 1000).toFixed(3);
+
+        // 4. Get AI completion
+        const aiStart = performance.now();
+        let sessionId: string | undefined;
+
+        if (sessionPromise) {
+          const conv = await sessionPromise;
+          sessionId = conv.session_id;
+        }
+
+        const completionStart = performance.now();
+        const aiResponse = await getCompletion(conversation, sessionId, true);
+        timings.ai_completion = ((performance.now() - completionStart) / 1000).toFixed(3);
+
+        const aiDuration = ((performance.now() - aiStart) / 1000).toFixed(3);
+        timings.ai_total = aiDuration;
+
+        conversation.push({
+          role: 'assistant',
+          content: aiResponse,
+        });
+
+        // ✅ IMMEDIATE UPDATE 2: Send AI response text as soon as completion finishes
+        sendEvent('ai_response', {
+          text: aiResponse,
+          timing: aiDuration
+        });
+
+        // 5. Text-to-Speech - Stream directly without disk I/O
+        const ttsStart = performance.now();
+
+        // Use OpenAI TTS directly for faster streaming
+        const openaiClient = new OpenAI({
+          apiKey: OPENAI_CONFIG.apiKey,
+          timeout: TTS_CONFIG.timeoutMs,
+        });
+
+        const ttsResponse = await openaiClient.audio.speech.create({
+          model: OPENAI_CONFIG.ttsModel,
+          voice: OPENAI_CONFIG.ttsVoice as any,
+          input: aiResponse,
+          response_format: 'mp3',
+        });
+
+        // Read audio directly into memory (no disk write)
+        const audioArrayBuffer = await ttsResponse.arrayBuffer();
+        const audioData = Buffer.from(audioArrayBuffer);
+
+        const ttsDuration = ((performance.now() - ttsStart) / 1000).toFixed(3);
+        timings.tts_total = ttsDuration;
+
+        // Encode conversation for next request
+        const encodeStart = performance.now();
+        const lastMessages = conversation.slice(-2);
+        const conversationB64 = Buffer.from(JSON.stringify(lastMessages)).toString('base64');
+        timings.encode = ((performance.now() - encodeStart) / 1000).toFixed(3);
+
+        const totalDuration = ((performance.now() - startTime) / 1000).toFixed(3);
+        timings.total = totalDuration;
+
+        // ✅ FINAL UPDATE: Send audio data, conversation history, and session_id
+        sendEvent('audio', {
+          data: audioData.toString('base64'),
+          conversation: conversationB64,
+          session_id: sessionId,  // Return session_id for client-side storage
+          session_created: sessionCreated,  // Indicate if this is a new session
+          timings: timings
+        });
+
+        // Detailed latency logging
+        console.log(`[LATENCY] Total: ${totalDuration}s`);
+        console.log(`[LATENCY] ├─ STT: ${timings.stt_total}s → Transcript sent immediately`);
+        console.log(`[LATENCY] ├─ AI: ${timings.ai_total}s → Response text sent immediately`);
+        console.log(`[LATENCY] └─ TTS: ${timings.tts_total}s → Audio sent when ready`);
+
+        // Close the stream
+        controller.close();
+
+      } catch (error: any) {
+        console.error('[INFERENCE-STREAM] Error:', error);
+        sendEvent('error', { message: error.message || 'Processing failed' });
+        controller.close();
+      }
+    }
+  });
+
+  return new Response(stream, {
+    headers: {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+    },
+  });
+}
