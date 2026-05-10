@@ -804,6 +804,11 @@ body {
   line-height: 1.5;
   padding: 6px 4px;
   margin: 0;
+  /* min-height guards against the autosize JS collapsing the
+     textarea to 0 on first paint (scrollHeight can be 0 before
+     fonts settle), which made the placeholder render as clipped
+     dots. 1.5 line-height × 14px font-size = 21px + 12px padding. */
+  min-height: 33px;
   max-height: 200px;
   overflow-y: auto;
   display: block;

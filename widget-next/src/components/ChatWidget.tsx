@@ -583,16 +583,16 @@ export default function ChatWidget({
     messagesEndRef.current?.scrollIntoView({ behavior: "auto", block: "end" });
   }, [messages]);
 
-  // Auto-resize textarea
+  // Auto-resize textarea. Floor by 33px (one line at 14px×1.5 + 12px
+  // padding) so the textarea never collapses to 0 if scrollHeight is
+  // 0 on first paint before fonts settle.
   useEffect(() => {
-    if (textareaRef.current) {
-      textareaRef.current.style.height = "auto";
-      const capped = Math.min(
-        textareaRef.current.scrollHeight,
-        UI_CONFIG.textareaMaxHeightPx
-      );
-      textareaRef.current.style.height = `${capped}px`;
-    }
+    if (!textareaRef.current) return;
+    const el = textareaRef.current;
+    el.style.height = "auto";
+    const natural = el.scrollHeight || 33;
+    const capped = Math.max(33, Math.min(natural, UI_CONFIG.textareaMaxHeightPx));
+    el.style.height = `${capped}px`;
   }, [input]);
 
   // Build chatHistory from current messages for the API

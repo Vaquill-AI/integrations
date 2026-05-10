@@ -49,7 +49,7 @@
     chatHeight: ds.chatHeight || "680px",
     position: (ds.position === "bottom-left" ? "bottom-left" : "bottom-right"),
     teaser: teaserText,
-    teaserDelayMs: Number.isFinite(teaserDelay) && teaserDelay >= 0 ? teaserDelay : 2000,
+    teaserDelayMs: Number.isFinite(teaserDelay) && teaserDelay >= 0 ? teaserDelay : 800,
   };
 
   const isLeft = config.position === "bottom-left";
@@ -160,12 +160,16 @@
   // ------------------------------------------------------------------ //
   const win = document.createElement("div");
   win.id = "vaquill-embed-window";
+  // Cap the height at the viewport minus the bottom offset + a little
+  // breathing room — otherwise on short browser windows the top of
+  // the chat (and even the input area) falls outside the viewport
+  // and users have to scroll the host page to see it.
   win.style.cssText = `
     position: fixed;
     bottom: ${bottomOffset};
     ${isLeft ? "left" : "right"}: ${sideOffset};
-    width: ${config.chatWidth};
-    height: ${config.chatHeight};
+    width: min(${config.chatWidth}, calc(100vw - 32px));
+    height: min(${config.chatHeight}, calc(100vh - ${bottomOffset} - 24px));
     background: #ffffff;
     border-radius: 16px;
     box-shadow: 0 24px 56px rgba(37, 33, 29, 0.18), 0 2px 8px rgba(37, 33, 29, 0.08);
@@ -396,9 +400,18 @@
     if (!teaser) return;
     teaser.style.display = "none";
   }
+  function showTeaser() {
+    if (!teaser || teaserDismissed()) return;
+    teaser.style.display = "block";
+  }
 
   // ------------------------------------------------------------------ //
   // Open / close                                                        //
+  //                                                                     //
+  // The teaser bubble sits *next to* the launcher whenever the chat is  //
+  // closed — it disappears while the chat window is open and comes      //
+  // back on close. It only stays gone permanently if the user clicks    //
+  // its × button (which sets sessionStorage).                           //
   // ------------------------------------------------------------------ //
   let isOpen = false;
 
@@ -407,7 +420,6 @@
     win.style.animation = "vq-embed-in 220ms cubic-bezier(0.4, 0, 0.2, 1) forwards";
     button.style.display = "none";
     hideTeaser();
-    rememberTeaserDismissed();
     isOpen = true;
   }
 
@@ -416,6 +428,7 @@
     setTimeout(() => {
       win.style.display = "none";
       button.style.display = "flex";
+      showTeaser();
       isOpen = false;
     }, 200);
   }
