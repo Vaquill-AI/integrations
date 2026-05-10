@@ -22,12 +22,35 @@ This pro version is the right fit when you need:
 ## Status
 
 This codebase started as a fork of an open-source RAG-widget project
-and has been rebranded to Vaquill. The chat-completion plumbing
-(`src/lib/ai/vaquill-client.ts`) still uses the upstream RAG API
-shape (project-id + bearer key), so you may need to adapt the
-request/response mapping to point at your Vaquill API key flow before
-production use. The UI, branding, env-var names, and storage keys are
-all Vaquill.
+and has been rebranded to Vaquill. The chat-completion plumbing in
+`src/lib/ai/vaquill-client.ts` now talks to the real Vaquill API
+(`https://api.vaquill.ai/api/v1/ask` and `/ask/stream`) — both
+streaming and non-streaming paths are wired and have been smoke-tested
+end-to-end. Multi-turn `chatHistory` is preserved server-side via a
+process-local session map so follow-up turns reference earlier
+context.
+
+What still uses the legacy RAG-API surface (and is stubbed in the
+client to avoid runtime errors): per-message feedback persistence,
+citation-by-id lookup, file uploads, and the agent-settings /
+agent-details endpoints. The UI consumes them but they degrade
+gracefully — feedback is recorded only in the local session cache,
+agent settings return Vaquill-flavoured defaults, and `uploadFile`
+throws a clear "not supported" error.
+
+Caveats to read before shipping:
+
+- The session map lives in process memory. On Vercel cold starts or
+  multi-instance deployments it resets — the React UI's IndexedDB /
+  localStorage is the durable copy, so users won't lose history,
+  but server-side `getConversationMessages` will return empty for a
+  cold instance until at least one turn is sent.
+- `VAQUILL_PROJECT_ID` is no longer required (left in `.env.example`
+  for back-compat with the legacy schema); only `VAQUILL_API_KEY`
+  matters.
+- The `AgentCapability` enum (`fastest-responses` / `optimal-choice`
+  / `advanced-reasoning` / `complex-tasks`) maps onto Vaquill's
+  `mode` (`standard` for the first two, `deep` for the latter two).
 
 ## Quick Start
 

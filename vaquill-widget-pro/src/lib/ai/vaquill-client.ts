@@ -1,32 +1,48 @@
 /**
  * Vaquill API Client
  *
- * Handles all communication with Vaquill Conversations API.
- * Supports conversation creation, message sending, and streaming responses.
+ * Talks to the public Vaquill chat API at api.vaquill.ai. The legacy
+ * project-id / session-based RAG service this client originally
+ * targeted has been replaced by Vaquill's stateless `/ask` and
+ * `/ask/stream` endpoints. To keep the existing widget UI + route
+ * handlers working without rewiring every component, this module:
+ *
+ *   1. Maintains a process-local Map<sessionId, MessageData[]> that
+ *      mimics the upstream's "fetch all messages for a session" call.
+ *      The client sends prior turns to /ask as `chatHistory` so
+ *      Vaquill can resolve "compare it with X" style follow-ups.
+ *   2. Exposes the same class methods (`createConversation`,
+ *      `sendMessage`, `sendMessageStream`, `getConversationMessages`,
+ *      etc.) the existing `/api/chat/*` routes import.
+ *   3. Stubs methods that have no Vaquill equivalent
+ *      (`uploadFile`, per-message insights, citation-by-id lookup) so
+ *      they don't throw — they degrade gracefully.
+ *
+ * Caveat: the in-memory session map is per Node process. On
+ * Vercel/serverless cold starts it resets. The widget's own
+ * client-side persistence (IndexedDB + localStorage) is the source
+ * of truth for users — this server cache only smooths over the
+ * route-handler contract during a single request lifecycle.
  */
 
-import { VAQUILL_CONFIG, LANGUAGE_CONFIG, AI_CONFIG } from '@/config/constants';
-import { retryAsync, RETRY_CONFIG_AI } from '@/lib/retry';
+import { VAQUILL_CONFIG } from '@/config/constants';
 
 const BASE_URL = VAQUILL_CONFIG.apiBaseUrl;
-const PROJECT_ID = VAQUILL_CONFIG.projectId;
 const API_KEY = VAQUILL_CONFIG.apiKey;
-const LANGUAGE = LANGUAGE_CONFIG.default;
+const COUNTRY_CODE = VAQUILL_CONFIG.countryCode;
+const MODE: 'standard' | 'deep' = VAQUILL_CONFIG.mode;
 
-// Warn about missing config but don't throw - app should still load
-if (typeof window === 'undefined') {
-  // Server-side warnings
-  if (!PROJECT_ID) {
-    console.warn('[Vaquill] Warning: VAQUILL_PROJECT_ID environment variable is not set. Vaquill features will be disabled.');
-  }
-  if (!API_KEY) {
-    console.warn('[Vaquill] Warning: VAQUILL_API_KEY environment variable is not set. Vaquill features will be disabled.');
-  }
+if (typeof window === 'undefined' && !API_KEY) {
+  console.warn(
+    '[Vaquill] VAQUILL_API_KEY is not set. Chat will return errors until configured.'
+  );
 }
 
-/**
- * Response types
- */
+// ============================================================================
+// Public types — kept compatible with the legacy contract so route handlers
+// and React components don't need refactoring.
+// ============================================================================
+
 export interface ConversationData {
   id: number;
   session_id: string;
@@ -78,14 +94,15 @@ export interface StreamData {
 }
 
 /**
- * Agent capability options for query-level model selection
- * These map to different AI model configurations in Vaquill
+ * Capability tier — maps to Vaquill's `mode` parameter.
+ * fastest/optimal → standard (faster, fewer techniques)
+ * advanced/complex → deep    (35+ techniques, hallucination detection)
  */
 export type AgentCapability =
-  | 'fastest-responses'    // Optimized for speed - GPT-4.1 mini
-  | 'optimal-choice'       // Balanced performance - GPT-4.1 mini
-  | 'advanced-reasoning'   // Enhanced reasoning - GPT-4.1
-  | 'complex-tasks';       // Most capable - o3
+  | 'fastest-responses'
+  | 'optimal-choice'
+  | 'advanced-reasoning'
+  | 'complex-tasks';
 
 export const AGENT_CAPABILITIES: { value: AgentCapability; label: string; description: string }[] = [
   { value: 'fastest-responses', label: 'Fastest', description: 'Quick responses for simple queries' },
@@ -93,6 +110,12 @@ export const AGENT_CAPABILITIES: { value: AgentCapability; label: string; descri
   { value: 'advanced-reasoning', label: 'Advanced', description: 'Enhanced reasoning capabilities' },
   { value: 'complex-tasks', label: 'Complex', description: 'Most capable for complex tasks' },
 ];
+
+function capabilityToMode(cap: AgentCapability | undefined): 'standard' | 'deep' {
+  if (cap === 'advanced-reasoning' || cap === 'complex-tasks') return 'deep';
+  if (cap === 'fastest-responses' || cap === 'optimal-choice') return 'standard';
+  return MODE;
+}
 
 export interface AgentSettings {
   chatbot_avatar: string | null;
@@ -200,600 +223,399 @@ export interface SourceData {
   pages: SourcePage[];
 }
 
-/**
- * Vaquill API Client
- */
+// ============================================================================
+// Vaquill /ask response shape (subset we use).
+// ============================================================================
+
+interface VaquillAskSource {
+  sourceIndex: number;
+  citation: string | null;
+  caseName: string | null;
+  court: string | null;
+  year: number | null;
+  excerpt: string;
+  relevanceScore: number;
+  pdfUrl: string | null;
+  externalUrl: string | null;
+  sourceType?: string | null;
+  corpusType?: string | null;
+  htmlUrl?: string | null;
+  statutePdfUrl?: string | null;
+  xmlUrl?: string | null;
+  govInfoHtmlUrl?: string | null;
+  govInfoPdfUrl?: string | null;
+}
+
+interface VaquillAskResponse {
+  data: {
+    answer: string;
+    sources: VaquillAskSource[];
+    questionInterpreted?: string;
+    mode: 'standard' | 'deep';
+  };
+  meta?: {
+    processingTimeMs?: number;
+    creditsConsumed?: number;
+    creditsRemaining?: number;
+  };
+}
+
+// ============================================================================
+// Server-side session cache. Each entry is the chronological list of
+// MessageData for that session. This is process-local and resets on
+// cold start — the React UI maintains its own durable copy in
+// IndexedDB / localStorage, so a cache miss here just means "no prior
+// turns sent to Vaquill on this request" rather than data loss.
+// ============================================================================
+
+const sessionStore = new Map<string, MessageData[]>();
+let nextMessageId = 1;
+let nextConversationId = 1;
+const sessionSources = new Map<number, VaquillAskSource>(); // messageId -> sources for citation lookup
+const messageSourceIndex = new Map<number, VaquillAskSource[]>(); // messageId -> source list
+
+function nowIso(): string {
+  return new Date().toISOString();
+}
+
+function makeSessionId(): string {
+  // RFC4122 v4 via crypto. Falls back to Math.random in environments
+  // where crypto.randomUUID isn't available (very old Node).
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  return 'sess-' + Math.random().toString(36).slice(2) + Date.now().toString(36);
+}
+
+function buildChatHistory(sessionId: string): { role: 'user' | 'assistant'; content: string }[] {
+  const messages = sessionStore.get(sessionId) ?? [];
+  const history: { role: 'user' | 'assistant'; content: string }[] = [];
+  for (const m of messages) {
+    history.push({ role: 'user', content: m.user_query });
+    if (m.openai_response) history.push({ role: 'assistant', content: m.openai_response });
+  }
+  // Vaquill caps history at 20 entries.
+  return history.slice(-20);
+}
+
+function recordMessage(
+  sessionId: string,
+  userMessage: string,
+  answer: string,
+  sources: VaquillAskSource[]
+): MessageData {
+  const id = nextMessageId++;
+  const sourceIndices = sources.map((s) => s.sourceIndex);
+
+  // Cache sources keyed by both messageId and individual citation index
+  // so getCitationDetails / getMessageWithInsights can look them up.
+  messageSourceIndex.set(id, sources);
+  for (const s of sources) sessionSources.set(s.sourceIndex, s);
+
+  const message: MessageData = {
+    id,
+    user_query: userMessage,
+    openai_response: answer,
+    citations: sourceIndices,
+    created_at: nowIso(),
+  };
+  const list = sessionStore.get(sessionId) ?? [];
+  list.push(message);
+  sessionStore.set(sessionId, list);
+  return message;
+}
+
+// ============================================================================
+// Client class
+// ============================================================================
+
 export class VaquillClient {
   private baseUrl: string;
-  private projectId: string;
   private apiKey: string;
-  private language: string;
 
   constructor() {
     this.baseUrl = BASE_URL;
-    this.projectId = PROJECT_ID || '';
-    this.apiKey = API_KEY || '';
-    this.language = LANGUAGE;
+    this.apiKey = API_KEY;
   }
 
-  /**
-   * Check if the client is properly configured
-   * @returns true if both projectId and apiKey are set
-   */
   isConfigured(): boolean {
-    return !!(this.projectId && this.apiKey);
+    return !!this.apiKey;
   }
 
-  /**
-   * Throws an error if the client is not configured
-   * Call this at the start of methods that require configuration
-   */
   private ensureConfigured(): void {
     if (!this.isConfigured()) {
-      throw new Error('Vaquill is not configured. Please set VAQUILL_PROJECT_ID and VAQUILL_API_KEY environment variables.');
+      throw new Error('Vaquill is not configured: VAQUILL_API_KEY is missing.');
     }
   }
 
-  /**
-   * Get headers for API requests
-   */
   private getHeaders(): HeadersInit {
     return {
-      'accept': 'application/json',
-      'content-type': 'application/json',
-      'authorization': `Bearer ${this.apiKey}`,
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${this.apiKey}`,
     };
   }
 
-  /**
-   * Fetch with timeout support
-   * @param url - Request URL
-   * @param options - Fetch options
-   * @param timeoutMs - Timeout in milliseconds (default: 30s)
-   * @returns Response
-   */
-  private async fetchWithTimeout(
-    url: string,
-    options: RequestInit,
-    timeoutMs: number = AI_CONFIG.apiTimeoutMs
-  ): Promise<Response> {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  // --------------------------------------------------------------------------
+  // Conversation lifecycle — synthetic on the server, real on the client.
+  // --------------------------------------------------------------------------
 
-    try {
-      const response = await fetch(url, {
-        ...options,
-        signal: controller.signal,
-      });
-      return response;
-    } catch (error: any) {
-      if (error.name === 'AbortError') {
-        throw new Error(`Request timeout after ${timeoutMs}ms`);
-      }
-      throw error;
-    } finally {
-      clearTimeout(timeoutId);
-    }
-  }
-
-  /**
-   * Create a new conversation
-   *
-   * @returns Conversation data with session_id
-   */
   async createConversation(): Promise<ConversationData> {
-    this.ensureConfigured();
-    const url = `${this.baseUrl}/projects/${this.projectId}/conversations`;
-
-    // Vaquill API requires a "name" field
-    const payload = { name: 'Chat Conversation' };
-
-    return retryAsync(async () => {
-      const response = await this.fetchWithTimeout(url, {
-        method: 'POST',
-        headers: this.getHeaders(),
-        body: JSON.stringify(payload),
-      });
-
-      if (!response.ok) {
-        const error = new Error(`Failed to create conversation: ${response.status} ${response.statusText}`);
-        (error as any).status = response.status;
-        throw error;
-      }
-
-      const data: ApiResponse<ConversationData> = await response.json();
-
-      if (data.status !== 'success') {
-        throw new Error(`Failed to create conversation: ${data.message || 'Unknown error'}`);
-      }
-
-      return data.data;
-    }, RETRY_CONFIG_AI, 'createConversation');
+    const sessionId = makeSessionId();
+    sessionStore.set(sessionId, []);
+    return {
+      id: nextConversationId++,
+      session_id: sessionId,
+      project_id: 0,
+      created_at: nowIso(),
+    };
   }
 
-  /**
-   * Send a message to a conversation (non-streaming)
-   *
-   * @param sessionId - The conversation session ID
-   * @param userMessage - The user's message text
-   * @param agentCapability - Optional agent capability for query-level model selection
-   * @returns Message response with AI response and citations
-   */
-  async sendMessage(sessionId: string, userMessage: string, agentCapability?: AgentCapability): Promise<MessageData> {
-    this.ensureConfigured();
-    const url = `${this.baseUrl}/projects/${this.projectId}/conversations/${sessionId}/messages`;
-
-    const params = new URLSearchParams({
-      stream: 'false',
-      lang: this.language,
-    });
-
-    const payload: Record<string, string> = {
-      prompt: userMessage,
-      response_source: 'default',
-    };
-
-    // Add agent_capability if provided
-    if (agentCapability) {
-      payload.agent_capability = agentCapability;
-    }
-
-    console.log('[Vaquill] sendMessage - capability:', agentCapability || 'none');
-    console.log('[Vaquill] sendMessage - payload:', JSON.stringify(payload));
-
-    return retryAsync(async () => {
-      const response = await this.fetchWithTimeout(`${url}?${params}`, {
-        method: 'POST',
-        headers: this.getHeaders(),
-        body: JSON.stringify(payload),
-      });
-
-      if (!response.ok) {
-        const error = new Error(`Failed to send message: ${response.status} ${response.statusText}`);
-        (error as any).status = response.status;
-        throw error;
-      }
-
-      const data: ApiResponse<MessageData> = await response.json();
-      console.log('[Vaquill] sendMessage - response received');
-
-      if (data.status !== 'success') {
-        throw new Error(`Failed to send message: ${data.message || 'Unknown error'}`);
-      }
-
-      return data.data;
-    }, RETRY_CONFIG_AI, 'sendMessage');
+  async deleteConversation(sessionId: string): Promise<boolean> {
+    sessionStore.delete(sessionId);
+    return true;
   }
 
-  /**
-   * Send a message and stream the response using Server-Sent Events
-   *
-   * @param sessionId - The conversation session ID
-   * @param userMessage - The user's message text
-   * @param agentCapability - Optional agent capability for query-level model selection
-   * @returns AsyncGenerator yielding chunks of the AI response
-   */
-  async *sendMessageStream(sessionId: string, userMessage: string, agentCapability?: AgentCapability): AsyncGenerator<string, void, unknown> {
+  async getConversationMessages(sessionId: string): Promise<MessageData[]> {
+    return sessionStore.get(sessionId) ?? [];
+  }
+
+  // --------------------------------------------------------------------------
+  // Chat — the only routes that actually hit Vaquill's API.
+  // --------------------------------------------------------------------------
+
+  async sendMessage(
+    sessionId: string,
+    userMessage: string,
+    agentCapability?: AgentCapability
+  ): Promise<MessageData> {
     this.ensureConfigured();
-    const url = `${this.baseUrl}/projects/${this.projectId}/conversations/${sessionId}/messages`;
 
-    const params = new URLSearchParams({
-      stream: 'true',
-      lang: this.language,
-    });
+    // Make sure the session exists so getConversationMessages can find it later.
+    if (!sessionStore.has(sessionId)) sessionStore.set(sessionId, []);
 
-    const payload: Record<string, string> = {
-      prompt: userMessage,
-      response_source: 'default',
+    const chatHistory = buildChatHistory(sessionId);
+    const body = {
+      question: userMessage,
+      mode: capabilityToMode(agentCapability),
+      countryCode: COUNTRY_CODE,
+      chatHistory,
     };
 
-    // Add agent_capability if provided
-    if (agentCapability) {
-      payload.agent_capability = agentCapability;
-    }
-
-    // Use longer timeout for streaming (60s) since response takes time
-    const response = await this.fetchWithTimeout(`${url}?${params}`, {
+    const res = await fetch(`${this.baseUrl}/ask`, {
       method: 'POST',
       headers: this.getHeaders(),
-      body: JSON.stringify(payload),
-    }, 60000);
+      body: JSON.stringify(body),
+    });
 
-    if (!response.ok) {
-      throw new Error(`Failed to send message: ${response.status} ${response.statusText}`);
+    if (!res.ok) {
+      let detail = `${res.status} ${res.statusText}`;
+      try {
+        const err = await res.json();
+        detail = err?.detail ?? err?.message ?? detail;
+      } catch {
+        // ignore
+      }
+      throw new Error(`Vaquill /ask failed: ${detail}`);
     }
 
-    if (!response.body) {
-      throw new Error('Response body is null');
+    const json = (await res.json()) as VaquillAskResponse;
+    const answer = json?.data?.answer ?? '';
+    const sources = json?.data?.sources ?? [];
+    return recordMessage(sessionId, userMessage, answer, sources);
+  }
+
+  /**
+   * Streaming chat — yields answer-text chunks as they arrive from
+   * Vaquill `/ask/stream`. The full answer + sources are persisted to
+   * the session map once the stream finishes so subsequent
+   * `getConversationMessages` calls return the new turn.
+   */
+  async *sendMessageStream(
+    sessionId: string,
+    userMessage: string,
+    agentCapability?: AgentCapability
+  ): AsyncGenerator<string, void, unknown> {
+    this.ensureConfigured();
+    if (!sessionStore.has(sessionId)) sessionStore.set(sessionId, []);
+
+    const chatHistory = buildChatHistory(sessionId);
+    const body = {
+      question: userMessage,
+      mode: capabilityToMode(agentCapability),
+      countryCode: COUNTRY_CODE,
+      chatHistory,
+    };
+
+    const res = await fetch(`${this.baseUrl}/ask/stream`, {
+      method: 'POST',
+      headers: this.getHeaders(),
+      body: JSON.stringify(body),
+    });
+
+    if (!res.ok || !res.body) {
+      let detail = `${res.status} ${res.statusText}`;
+      try {
+        const err = await res.json();
+        detail = err?.detail ?? err?.message ?? detail;
+      } catch {
+        // ignore
+      }
+      throw new Error(`Vaquill /ask/stream failed: ${detail}`);
     }
 
-    // Parse SSE stream
-    const reader = response.body.getReader();
+    const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
+    let assembled = '';
+    let finalSources: VaquillAskSource[] = [];
 
     try {
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-
         buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
 
-        // Keep the last incomplete line in buffer
-        buffer = lines.pop() || '';
+        const lines = buffer.split('\n');
+        buffer = lines.pop() ?? '';
 
         for (const line of lines) {
-          if (!line.trim()) continue;
+          const trimmed = line.trim();
+          if (!trimmed.startsWith('data:')) continue;
+          const dataStr = trimmed.slice(5).trim();
+          if (!dataStr) continue;
 
-          // SSE format: "data: {json}"
-          if (line.startsWith('data: ')) {
-            const dataStr = line.substring(6);
+          let event: any;
+          try {
+            event = JSON.parse(dataStr);
+          } catch {
+            continue;
+          }
 
-            try {
-              const data: StreamData = JSON.parse(dataStr);
-
-              // Handle progress events with message chunks
-              if (data.status === 'progress' && data.message) {
-                yield data.message;
-              }
-
-              // Handle finish event (end of stream)
-              if (data.status === 'finish') {
-                return;
-              }
-
-              // Handle error event
-              if (data.status === 'error') {
-                throw new Error(data.error || 'Stream error occurred');
-              }
-            } catch (error) {
-              if (error instanceof SyntaxError) {
-                // Skip malformed JSON
-                continue;
-              }
-              throw error;
-            }
+          if (event.type === 'chunk' && typeof event.content === 'string') {
+            assembled += event.content;
+            yield event.content;
+          } else if (event.type === 'sources' && Array.isArray(event.sources)) {
+            finalSources = event.sources as VaquillAskSource[];
+          } else if (event.type === 'error') {
+            throw new Error(event.error ?? 'Vaquill stream error');
           }
         }
       }
     } finally {
       reader.releaseLock();
     }
+
+    // Persist the assembled turn so it shows up in conversation history.
+    recordMessage(sessionId, userMessage, assembled, finalSources);
   }
 
-  /**
-   * Get all messages in a conversation
-   *
-   * @param sessionId - The conversation session ID
-   * @returns List of messages in the conversation
-   */
-  async getConversationMessages(sessionId: string): Promise<MessageData[]> {
-    this.ensureConfigured();
-    const allMessages: MessageData[] = [];
-    let page = 1;
-    let hasMore = true;
-    const maxPages = 50; // Safety limit to prevent infinite loops
+  // --------------------------------------------------------------------------
+  // Per-message extras — Vaquill's API doesn't store messages
+  // server-side, so feedback / insights / citation lookups operate on
+  // the local session cache.
+  // --------------------------------------------------------------------------
 
-    // Fetch all pages of messages in ascending order (oldest first)
-    while (hasMore && page <= maxPages) {
-      const url = `${this.baseUrl}/projects/${this.projectId}/conversations/${sessionId}/messages?page=${page}&order=asc`;
-
-      // Each page fetch has retry logic with shorter timeout
-      const pageData = await retryAsync(async () => {
-        const response = await this.fetchWithTimeout(url, {
-          method: 'GET',
-          headers: this.getHeaders(),
-        }, AI_CONFIG.paginationTimeoutMs);
-
-        if (!response.ok) {
-          const error = new Error(`Failed to get messages: ${response.status} ${response.statusText}`);
-          (error as any).status = response.status;
-          throw error;
-        }
-
-        const data = await response.json();
-
-        if (data.status !== 'success') {
-          throw new Error(`Failed to get messages: ${data.message || 'Unknown error'}`);
-        }
-
-        return data;
-      }, RETRY_CONFIG_AI, `getConversationMessages-page-${page}`);
-
-      // Vaquill returns: { data: { conversation: {...}, messages: { data: [...], last_page: n } } }
-      const messages = pageData.data?.messages?.data || [];
-      const lastPage = pageData.data?.messages?.last_page || 1;
-
-      if (Array.isArray(messages)) {
-        allMessages.push(...messages);
-      }
-
-      // Check if there are more pages
-      hasMore = page < lastPage;
-      page++;
-    }
-
-    if (page > maxPages) {
-      console.warn(`[Vaquill] Reached max page limit (${maxPages}) for conversation ${sessionId}`);
-    }
-
-    return allMessages;
-  }
-
-  /**
-   * Update reaction for a specific message
-   *
-   * @param sessionId - The conversation session ID
-   * @param messageId - The message ID (prompt_id)
-   * @param reaction - "liked", "disliked", or null to remove reaction
-   * @returns Updated message data with response_feedback
-   */
   async updateMessageReaction(
     sessionId: string,
     messageId: number,
     reaction: 'liked' | 'disliked' | null
   ): Promise<MessageData> {
-    this.ensureConfigured();
-    // Validate reaction value
-    if (reaction !== 'liked' && reaction !== 'disliked' && reaction !== null) {
-      throw new Error(`Invalid reaction value: ${reaction}. Must be 'liked', 'disliked', or null`);
+    // Vaquill has no server-side feedback endpoint, so we record the
+    // reaction on the local session-cached message and echo it back.
+    // The UI can also persist client-side if it wants durability.
+    const messages = sessionStore.get(sessionId) ?? [];
+    const idx = messages.findIndex((m) => m.id === messageId);
+    if (idx === -1) {
+      throw new Error(`Message ${messageId} not found in session ${sessionId}`);
     }
-
-    const url = `${this.baseUrl}/projects/${this.projectId}/conversations/${sessionId}/messages/${messageId}/feedback`;
-
-    const payload = { reaction };
-
-    console.log('[Vaquill] Updating message reaction:', { url, payload });
-
-    return retryAsync(async () => {
-      const response = await this.fetchWithTimeout(url, {
-        method: 'PUT',
-        headers: this.getHeaders(),
-        body: JSON.stringify(payload),
-      });
-
-      if (!response.ok) {
-        // Try to get error details from response body
-        let errorDetails = `${response.status} ${response.statusText}`;
-        try {
-          const errorBody = await response.json();
-          errorDetails = errorBody.data?.message || errorBody.message || errorDetails;
-          console.error('[Vaquill] Feedback API error response:', errorBody);
-        } catch {
-          // Couldn't parse error body
-        }
-        const error = new Error(`Failed to update reaction: ${errorDetails}`);
-        (error as any).status = response.status;
-        throw error;
-      }
-
-      const data: ApiResponse<MessageData> = await response.json();
-
-      if (data.status !== 'success') {
-        throw new Error(`Failed to update reaction: ${data.message || 'Unknown error'}`);
-      }
-
-      console.log('[Vaquill] Reaction updated successfully');
-      return data.data;
-    }, RETRY_CONFIG_AI, 'updateMessageReaction');
+    const updated: MessageData = {
+      ...messages[idx],
+      response_feedback: {
+        created_at: messages[idx].response_feedback?.created_at ?? nowIso(),
+        updated_at: nowIso(),
+        user_id: 0,
+        reaction,
+      },
+    };
+    messages[idx] = updated;
+    sessionStore.set(sessionId, messages);
+    return updated;
   }
 
-  /**
-   * Get a single message with customer intelligence insights
-   *
-   * @param sessionId - The conversation session ID
-   * @param messageId - The message ID (prompt_id)
-   * @returns Message data with customer intelligence
-   */
   async getMessageWithInsights(sessionId: string, messageId: number): Promise<MessageData> {
-    this.ensureConfigured();
-    const url = `${this.baseUrl}/projects/${this.projectId}/conversations/${sessionId}/messages/${messageId}?includeInsights=true`;
-
-    return retryAsync(async () => {
-      const response = await this.fetchWithTimeout(url, {
-        method: 'GET',
-        headers: this.getHeaders(),
-      });
-
-      if (!response.ok) {
-        const error = new Error(`Failed to get message insights: ${response.status} ${response.statusText}`);
-        (error as any).status = response.status;
-        throw error;
-      }
-
-      const data: ApiResponse<MessageData> = await response.json();
-
-      if (data.status !== 'success') {
-        throw new Error(`Failed to get message insights: ${data.message || 'Unknown error'}`);
-      }
-
-      return data.data;
-    }, RETRY_CONFIG_AI, 'getMessageWithInsights');
+    const messages = sessionStore.get(sessionId) ?? [];
+    const found = messages.find((m) => m.id === messageId);
+    if (!found) {
+      throw new Error(`Message ${messageId} not found in session ${sessionId}`);
+    }
+    return found;
   }
 
-  /**
-   * Get citation details
-   *
-   * @param citationId - The citation ID
-   * @returns Citation details
-   */
-  async getCitationDetails(citationId: number): Promise<any> {
-    this.ensureConfigured();
-    const url = `${this.baseUrl}/projects/${this.projectId}/citations/${citationId}`;
-
-    return retryAsync(async () => {
-      const response = await this.fetchWithTimeout(url, {
-        method: 'GET',
-        headers: this.getHeaders(),
-      });
-
-      if (!response.ok) {
-        const error = new Error(`Failed to get citation: ${response.status} ${response.statusText}`);
-        (error as any).status = response.status;
-        throw error;
-      }
-
-      const data: ApiResponse<any> = await response.json();
-
-      if (data.status !== 'success') {
-        throw new Error(`Failed to get citation: ${data.message || 'Unknown error'}`);
-      }
-
-      return data.data;
-    }, RETRY_CONFIG_AI, 'getCitationDetails');
+  async getCitationDetails(citationId: number): Promise<VaquillAskSource | null> {
+    return sessionSources.get(citationId) ?? null;
   }
 
-  /**
-   * Get agent settings
-   *
-   * @returns Agent settings including title, avatar, example questions, etc.
-   */
+  // --------------------------------------------------------------------------
+  // Agent metadata — Vaquill is a hosted multi-tenant API, so there's no
+  // per-deployment agent "settings" object. Return sensible defaults.
+  // --------------------------------------------------------------------------
+
   async getAgentSettings(): Promise<AgentSettings> {
-    this.ensureConfigured();
-    const url = `${this.baseUrl}/projects/${this.projectId}/settings`;
-
-    return retryAsync(async () => {
-      const response = await this.fetchWithTimeout(url, {
-        method: 'GET',
-        headers: this.getHeaders(),
-      });
-
-      if (!response.ok) {
-        const error = new Error(`Failed to get agent settings: ${response.status} ${response.statusText}`);
-        (error as any).status = response.status;
-        throw error;
-      }
-
-      const data: ApiResponse<AgentSettings> = await response.json();
-
-      if (data.status !== 'success') {
-        throw new Error(`Failed to get agent settings: ${data.message || 'Unknown error'}`);
-      }
-
-      return data.data;
-    }, RETRY_CONFIG_AI, 'getAgentSettings');
+    return {
+      chatbot_avatar: null,
+      example_questions: [
+        'What is qualified immunity under 42 USC 1983?',
+        'What are the elements of a Rule 10b-5 securities-fraud claim?',
+        "What's the standard for granting a preliminary injunction?",
+      ],
+      chatbot_title: 'Vaquill Legal Assistant',
+      chatbot_color: '#6e3730',
+      chatbot_toolbar_color: '#6e3730',
+      chatbot_msg_lang: 'en',
+      enable_citations: 3,
+      enable_feedbacks: true,
+      citations_view_type: 'cards',
+      markdown_enabled: true,
+      hide_sources_from_responses: false,
+      can_share_conversation: false,
+      can_export_conversation: true,
+      remove_branding: false,
+      input_field_addendum: 'Information only, not legal advice. Verify all citations.',
+      no_answer_message:
+        "I couldn't find authoritative US legal sources for that. Try rephrasing or narrowing the question.",
+      try_asking_questions_msg: 'Try asking:',
+      view_more_msg: 'View more',
+      view_less_msg: 'View less',
+    };
   }
 
-  /**
-   * Get agent details
-   *
-   * @returns Agent details including name, type, status, etc.
-   */
   async getAgentDetails(): Promise<AgentDetails> {
-    this.ensureConfigured();
-    const url = `${this.baseUrl}/projects/${this.projectId}`;
-
-    return retryAsync(async () => {
-      const response = await this.fetchWithTimeout(url, {
-        method: 'GET',
-        headers: this.getHeaders(),
-      });
-
-      if (!response.ok) {
-        const error = new Error(`Failed to get agent details: ${response.status} ${response.statusText}`);
-        (error as any).status = response.status;
-        throw error;
-      }
-
-      const data: ApiResponse<AgentDetails> = await response.json();
-
-      if (data.status !== 'success') {
-        throw new Error(`Failed to get agent details: ${data.message || 'Unknown error'}`);
-      }
-
-      return data.data;
-    }, RETRY_CONFIG_AI, 'getAgentDetails');
+    return {
+      id: 0,
+      project_name: 'Vaquill Legal Assistant',
+      is_chat_active: true,
+      user_id: 0,
+      team_id: 0,
+      created_at: nowIso(),
+      updated_at: nowIso(),
+      type: 'chatbot',
+      is_shared: false,
+      are_licenses_allowed: false,
+    };
   }
 
-  /**
-   * Upload a file as a new source for the agent
-   *
-   * @param file - The file to upload
-   * @returns Source data with upload status
-   */
-  async uploadFile(file: File): Promise<SourceData> {
-    this.ensureConfigured();
-    const url = `${this.baseUrl}/projects/${this.projectId}/sources`;
+  // --------------------------------------------------------------------------
+  // Source upload — not supported by Vaquill /ask. The widget's upload
+  // UI is preserved for future RAG-ingestion work; for now we throw a
+  // clear, recoverable error so the UI can show "uploads not available".
+  // --------------------------------------------------------------------------
 
-    const formData = new FormData();
-    formData.append('file', file);
-
-    return retryAsync(async () => {
-      // Use longer timeout for file uploads (60s)
-      const response = await this.fetchWithTimeout(url, {
-        method: 'POST',
-        headers: {
-          'accept': 'application/json',
-          'authorization': `Bearer ${this.apiKey}`,
-        },
-        body: formData,
-      }, 60000);
-
-      if (!response.ok) {
-        let errorMessage = `${response.status} ${response.statusText}`;
-        try {
-          const errorBody = await response.json();
-          errorMessage = errorBody.data?.message || errorBody.message || errorMessage;
-        } catch {
-          // Couldn't parse error body
-        }
-        const error = new Error(`Failed to upload file: ${errorMessage}`);
-        (error as any).status = response.status;
-        throw error;
-      }
-
-      const data: ApiResponse<SourceData> = await response.json();
-
-      if (data.status !== 'success') {
-        throw new Error(`Failed to upload file: ${data.message || 'Unknown error'}`);
-      }
-
-      return data.data;
-    }, RETRY_CONFIG_AI, 'uploadFile');
-  }
-
-  /**
-   * Delete a conversation
-   * @param sessionId - The session ID of the conversation to delete
-   * @returns True if deletion was successful
-   */
-  async deleteConversation(sessionId: string): Promise<boolean> {
-    this.ensureConfigured();
-    const url = `${this.baseUrl}/projects/${this.projectId}/conversations/${sessionId}`;
-
-    return retryAsync(async () => {
-      const response = await this.fetchWithTimeout(url, {
-        method: 'DELETE',
-        headers: {
-          'accept': 'application/json',
-          'authorization': `Bearer ${this.apiKey}`,
-        },
-      });
-
-      if (!response.ok) {
-        let errorMessage = `${response.status} ${response.statusText}`;
-        try {
-          const errorBody = await response.json();
-          errorMessage = errorBody.data?.message || errorBody.message || errorMessage;
-        } catch {
-          // Couldn't parse error body
-        }
-        const error = new Error(`Failed to delete conversation: ${errorMessage}`);
-        (error as any).status = response.status;
-        throw error;
-      }
-
-      const data: ApiResponse<{ deleted: boolean }> = await response.json();
-
-      if (data.status !== 'success') {
-        throw new Error(`Failed to delete conversation: ${data.message || 'Unknown error'}`);
-      }
-
-      return data.data.deleted;
-    }, RETRY_CONFIG_AI, 'deleteConversation');
+  async uploadFile(_file: File): Promise<SourceData> {
+    throw new Error(
+      'File uploads are not supported by the Vaquill chat API. Use the Vaquill matter-document endpoints to ingest files.'
+    );
   }
 }
 
-// Export singleton instance
 export const vaquillClient = new VaquillClient();

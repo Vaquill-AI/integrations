@@ -38,11 +38,18 @@ function parseFloat(value: string | undefined, defaultValue: number): number {
 // ============================================
 
 export const VAQUILL_CONFIG = {
+  /** Legacy field — Vaquill's stateless /ask doesn't require a project id, kept for back-compat. */
   projectId: process.env.VAQUILL_PROJECT_ID || '',
+  /** Required: starts with `vq_key_`. */
   apiKey: process.env.VAQUILL_API_KEY || '',
-  apiBaseUrl: process.env.VAQUILL_API_BASE_URL || 'https://app.vaquill.ai/api/v1',
+  /** Public Vaquill API. */
+  apiBaseUrl: process.env.VAQUILL_API_BASE_URL || 'https://api.vaquill.ai/api/v1',
   stream: parseBoolean(process.env.VAQUILL_STREAM, true),
   useVaquill: parseBoolean(process.env.USE_VAQUILL, true),
+  /** Country pinned per-deployment. US default; flip to IN for Indian law. */
+  countryCode: (process.env.VAQUILL_COUNTRY_CODE === 'IN' ? 'IN' : 'US') as 'US' | 'IN',
+  /** Mode pinned per-deployment. */
+  mode: (process.env.VAQUILL_MODE === 'deep' ? 'deep' : 'standard') as 'standard' | 'deep',
 } as const;
 
 // ============================================
