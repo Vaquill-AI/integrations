@@ -13,7 +13,8 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { vaquillClient, ChatHistoryEntry, VaquillMode } from "@/lib/vaquill";
+import { vaquillClient, ChatHistoryEntry } from "@/lib/vaquill";
+import { VAQUILL_CONFIG } from "@/config/constants";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -23,12 +24,10 @@ export async function POST(request: NextRequest) {
     const body = await request.json();
     const {
       question,
-      mode,
       sources,
       chatHistory,
     }: {
       question?: string;
-      mode?: VaquillMode;
       sources?: string[];
       chatHistory?: ChatHistoryEntry[];
     } = body;
@@ -40,9 +39,13 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    // Mode, country, and maxSources enforced server-side. Client-sent
+    // values are ignored.
     const upstreamResponse = await vaquillClient.askStream({
       question: question.trim(),
-      mode,
+      mode: VAQUILL_CONFIG.mode,
+      countryCode: VAQUILL_CONFIG.countryCode,
+      maxSources: VAQUILL_CONFIG.maxSources,
       sources,
       chatHistory: chatHistory ?? [],
     });
@@ -82,18 +85,24 @@ export async function POST(request: NextRequest) {
               try {
                 const event = JSON.parse(dataStr);
 
-                // Vaquill stream events:
-                //   { type: "chunk", text: string }
-                //   { type: "done", sources: [], questionInterpreted: string, mode: string }
-                //   { type: "error", error: string }
-                if (event.type === "chunk" && typeof event.text === "string") {
-                  enqueue({ type: "chunk", text: event.text });
+                // Upstream Vaquill /ask/stream event types:
+                //   stream_init       — first event, ignore
+                //   thinking          — progress messages, ignore for now
+                //   thinking_complete — ignore
+                //   sources           — { sources: [...] } pre-stream
+                //   chunk             — { content: "<token>" } answer text
+                //   done              — final marker (may carry meta)
+                //   error             — { error: "<msg>" }
+                //
+                // We normalise to a smaller set the client understands.
+                if (event.type === "chunk" && typeof event.content === "string") {
+                  enqueue({ type: "chunk", text: event.content });
+                } else if (event.type === "sources" && Array.isArray(event.sources)) {
+                  enqueue({ type: "sources", sources: event.sources });
                 } else if (event.type === "done") {
                   enqueue({
                     type: "done",
-                    sources: event.sources ?? [],
-                    questionInterpreted: event.questionInterpreted ?? "",
-                    mode: event.mode ?? "standard",
+                    questionInterpreted: event.questionInterpreted ?? event.question_interpreted ?? "",
                   });
                   controller.close();
                   return;
@@ -102,6 +111,7 @@ export async function POST(request: NextRequest) {
                   controller.close();
                   return;
                 }
+                // stream_init / thinking / thinking_complete are dropped
               } catch {
                 // Malformed SSE line — skip
               }

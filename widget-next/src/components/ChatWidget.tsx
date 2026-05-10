@@ -1,12 +1,13 @@
 "use client";
 
-import { useState, useEffect, useRef, useCallback } from "react";
+import { memo, useState, useEffect, useRef, useCallback } from "react";
+import { createPortal } from "react-dom";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkBreaks from "remark-breaks";
-import type { VaquillSource, VaquillMode } from "@/lib/vaquill";
-import { useTTS } from "@/hooks/useTTS";
-import { UI_CONFIG, VAQUILL_CONFIG } from "@/config/constants";
+import type { VaquillSource } from "@/lib/vaquill";
+import { UI_CONFIG } from "@/config/constants";
+import { linkifyCitations } from "@/lib/markdown";
 
 // ============================================
 // Types
@@ -19,58 +20,492 @@ interface Message {
   timestamp: number;
   sources?: VaquillSource[];
   questionInterpreted?: string;
-  mode?: VaquillMode;
 }
 
 interface ChatWidgetProps {
   /** Override the display name shown in the header */
   agentName?: string;
-  /** Chat mode: standard (default) or deep */
-  defaultMode?: VaquillMode;
   /** Initial placeholder questions shown before first message */
   exampleQuestions?: string[];
-  /** Whether TTS playback button is enabled */
-  ttsEnabled?: boolean;
-  /** Whether microphone (STT) button is enabled */
-  sttEnabled?: boolean;
+  /**
+   * True when the widget is loaded inside the floating embed iframe.
+   * The outer floating window already shows the title + close button,
+   * so we hide the widget's own header to avoid a duplicate.
+   */
+  embedded?: boolean;
 }
 
 // ============================================
 // Source card
 // ============================================
 
-function SourceCard({ source }: { source: VaquillSource }) {
+/**
+ * Force `http://` URLs onto HTTPS so browsers don't refuse to navigate
+ * from a secure page (mixed-content block). Most US court PDFs are
+ * served over HTTPS too — the API just returns the canonical HTTP
+ * variant for some courts.
+ */
+function upgradeHttp(url: string | null | undefined): string | null {
+  if (!url) return null;
+  return url.startsWith("http://") ? "https://" + url.slice(7) : url;
+}
+
+/**
+ * Public Vaquill statute viewer. Sections live at
+ *   https://statutes.vaquill.ai/section/{actId}
+ * and render readable HTML for free — no auth, no app login. This is
+ * the right link to surface to chatbot embedders (the app at
+ * app.vaquill.ai requires an account).
+ */
+const VAQUILL_STATUTE_VIEWER = "https://statutes.vaquill.ai";
+
+/**
+ * Derive the canonical Vaquill viewer URL.
+ *
+ * USC actId is `USC_T{title}_C{chapter}_S{section}`. The chapter
+ * isn't in the citation string — it's encoded in the API's `htmlUrl`
+ * (and the govinfo `externalUrl`) as `…-chap{N}-…`. We parse from
+ * those URLs first; the citation alone can't reconstruct it.
+ *
+ *   htmlUrl "/USCODE-2024-title12-chap22-sec1972.htm"
+ *     → /section/USC_T12_C22_S1972
+ *
+ *   htmlUrl "/USCODE-2024-title12-chap53-subchapII-sec5390.htm"
+ *     → /section/USC_T12_C53_S5390   (subchapter dropped — viewer
+ *                                      uses chapter only)
+ *
+ * CFR actId is `CFR_T{title}_P{part}_S{section}`. The citation has
+ * everything we need.
+ *
+ *   "17 C.F.R. § 240.10b-5"
+ *     → /section/CFR_T17_P240_S240_10b_5
+ */
+function buildStatuteViewerUrl(source: VaquillSource): string | null {
+  // ── USC ──
+  if (source.corpusType === "USC") {
+    // Try every URL-shaped field that might encode the chapter.
+    const probes = [source.htmlUrl, source.pdfUrl, source.externalUrl].filter(
+      (u): u is string => typeof u === "string" && u.length > 0
+    );
+    for (const url of probes) {
+      // Match the canonical USCODE path:
+      //   …title{N}-chap{X}[-subchap…]-sec{Y}[.ext]
+      const m =
+        /title(\d+)[\s\S]*?chap(\w+?)(?:-subchap\w+)?-sec([\w-]+?)(?:\.(?:htm|html|pdf|xml))?(?:[/?#]|$)/i.exec(
+          url
+        );
+      if (m) {
+        return `${VAQUILL_STATUTE_VIEWER}/section/USC_T${m[1]}_C${m[2]}_S${m[3]}`;
+      }
+    }
+    // Couldn't reconstruct chapter — caller will fall back to the
+    // raw R2 htmlUrl, which is still readable HTML.
+    return null;
+  }
+
+  // ── CFR ──
+  if (source.corpusType === "CFR") {
+    const citation = source.citation;
+    if (!citation) return null;
+    const cfr = /^\s*(\d+)\s*C\.?\s*F\.?\s*R\.?\s*§?\s*([\d\w.-]+)/i.exec(citation);
+    if (!cfr) return null;
+    const title = cfr[1];
+    const fullSection = cfr[2];
+    const partMatch = /^(\d+)/.exec(fullSection);
+    if (!partMatch) return null;
+    const part = partMatch[1];
+    // 380.23 → 380_23, 240.10b-5 → 240_10b_5
+    const safeSection = fullSection.replace(/[.\-]/g, "_");
+    return `${VAQUILL_STATUTE_VIEWER}/section/CFR_T${title}_P${part}_S${safeSection}`;
+  }
+
+  return null;
+}
+
+/**
+ * Resolve the link list for a source by `sourceType`. Vaquill-hosted
+ * URLs are the only thing we surface for statutes — external fallbacks
+ * (govinfo, ecfr) are dropped when any Vaquill URL is present, since
+ * we host the canonical content ourselves at `statutes-us.vaquill.ai`.
+ * External is used only when the Vaquill copy is genuinely unavailable.
+ *
+ * For case-law sources Vaquill doesn't host opinions, so the court CDN
+ * `pdfUrl` and (if no PDF) the external opinion link are the only
+ * options.
+ *
+ * All URLs are upgraded to HTTPS so secure pages don't refuse the
+ * navigation as mixed content.
+ */
+function resolveSourceLinks(
+  source: VaquillSource
+): Array<{ label: string; href: string; primary?: boolean }> {
+  const links: Array<{ label: string; href: string; primary?: boolean }> = [];
+  const pdfUrl = upgradeHttp(source.pdfUrl);
+  const externalUrl = upgradeHttp(source.externalUrl);
+  const htmlUrl = upgradeHttp(source.htmlUrl);
+  const statutePdfUrl = upgradeHttp(source.statutePdfUrl);
+  const xmlUrl = upgradeHttp(source.xmlUrl);
+
+  if (source.sourceType === "us_statute") {
+    // Primary: the Vaquill app viewer (readable HTML page) derived
+    // from the citation. If we can't parse the citation, fall back to
+    // the raw R2 `.htm` (which still works, just less polished).
+    const viewerUrl = buildStatuteViewerUrl(source);
+    if (viewerUrl) {
+      links.push({ label: "Read on Vaquill", href: viewerUrl, primary: true });
+    } else if (htmlUrl) {
+      links.push({ label: "Read on Vaquill", href: htmlUrl, primary: true });
+    }
+    // Secondary: a PDF download for offline use. Skip the raw XML —
+    // it's machine-readable, not user-readable.
+    if (statutePdfUrl) {
+      links.push({ label: "PDF", href: statutePdfUrl, primary: !links.length });
+    }
+    // Last-resort fallback: only if we have no Vaquill resource at all
+    // do we surface the official source (govinfo / ecfr).
+    if (links.length === 0 && externalUrl) {
+      links.push({ label: "Official source", href: externalUrl, primary: true });
+    }
+    void xmlUrl; // intentionally unused — XML is not user-facing
+    return links.slice(0, 3);
+  }
+
+  // US case opinions — Vaquill doesn't host these; the court's own CDN
+  // PDF is the canonical link.
+  if (pdfUrl) links.push({ label: "View opinion PDF", href: pdfUrl, primary: true });
+  if (externalUrl)
+    links.push({ label: "Open opinion", href: externalUrl, primary: !links.length });
+  return links.slice(0, 3);
+}
+
+function formatYear(source: VaquillSource): string | null {
+  if (source.year) return String(source.year);
+  if (source.decisionDate) {
+    const m = /^(\d{4})/.exec(source.decisionDate);
+    if (m) return m[1];
+  }
+  return null;
+}
+
+function SourceCard({ source, msgId }: { source: VaquillSource; msgId: string }) {
+  const isStatute = source.sourceType === "us_statute";
+  const links = resolveSourceLinks(source);
+  const year = formatYear(source);
+  const meta: string[] = [];
+  if (source.court) meta.push(source.court);
+  if (year) meta.push(year);
+  if (source.disposition) meta.push(source.disposition);
+
   return (
-    <div className="source-card">
+    <div className="source-card" id={`src-${msgId}-${source.sourceIndex}`}>
+      <span
+        className="source-index"
+        aria-label={`Source ${source.sourceIndex}`}
+      >
+        {source.sourceIndex}
+      </span>
+
       <div className="source-card-header">
-        <span className="source-case-name">{source.caseName}</span>
-        {source.relevanceScore > 0 && (
-          <span className="source-relevance">
-            {Math.round(source.relevanceScore * 100)}%
+        <span className="source-case-name">
+          {source.caseName ?? source.citation ?? "Untitled source"}
+        </span>
+      </div>
+
+      <div className="source-meta">
+        {isStatute && (
+          <span className="source-badge source-badge--statute">
+            {source.corpusType ?? "Statute"}
           </span>
         )}
+        {source.citation && <span className="source-citation">{source.citation}</span>}
+        {meta.length > 0 && source.citation && <span className="source-separator">·</span>}
+        {meta.length > 0 && (
+          <span className="source-court">{meta.join(" · ")}</span>
+        )}
       </div>
-      <div className="source-meta">
-        <span className="source-citation">{source.citation}</span>
-        <span className="source-separator">·</span>
-        <span className="source-court">{source.court}</span>
-      </div>
+
+      {source.docketNumber && (
+        <div className="source-meta source-meta--secondary">
+          <span>Docket: {source.docketNumber}</span>
+        </div>
+      )}
+
       {source.excerpt && (
         <p className="source-excerpt">&ldquo;{source.excerpt}&rdquo;</p>
       )}
-      {source.pdfUrl && (
-        <a
-          href={source.pdfUrl}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="source-pdf-link"
-        >
-          View judgment PDF
-        </a>
+
+      {links.length > 0 && (
+        <div className="source-links">
+          {links.map((l) => (
+            <a
+              key={l.href}
+              href={l.href}
+              target="_blank"
+              rel="noopener noreferrer"
+              className={`source-pdf-link${l.primary ? " source-pdf-link--primary" : ""}`}
+            >
+              {l.label}
+            </a>
+          ))}
+        </div>
       )}
     </div>
   );
 }
+
+// ============================================
+// Citation verification — count `[N]` markers in the answer, check that
+// every one resolves to a real source.sourceIndex. Used for the
+// "All N citations grounded" badge on the assistant header.
+// ============================================
+
+function verifyCitations(
+  content: string,
+  sources: VaquillSource[] | undefined
+): { total: number; matched: number; allGrounded: boolean } {
+  const indices = new Set<number>();
+  const re = /\[(\d+)\]/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(content)) !== null) {
+    indices.add(Number(m[1]));
+  }
+  const sourceSet = new Set((sources ?? []).map((s) => s.sourceIndex));
+  let matched = 0;
+  for (const i of indices) if (sourceSet.has(i)) matched++;
+  return {
+    total: indices.size,
+    matched,
+    allGrounded: indices.size > 0 && matched === indices.size,
+  };
+}
+
+// Suggested follow-ups shown under each completed assistant message.
+// Generic legal-research prompts that work after any answer.
+const FOLLOW_UPS: readonly string[] = [
+  "Are there later cases that distinguish this holding?",
+  "How have circuits split on this issue?",
+  "What's the standard of review on appeal?",
+];
+
+// ============================================
+// Persistence — localStorage so chat survives refresh + close-reopen.
+// Keep the last MAX_PERSISTED messages (50 user+assistant turns) to
+// avoid unbounded growth. Schema-versioned so we can evolve later.
+// ============================================
+
+const STORAGE_KEY = "vaquill-widget-messages-v1";
+const MAX_PERSISTED = 50;
+
+function loadStoredMessages(): Message[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const raw = window.localStorage.getItem(STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    // Light validation — drop anything missing required shape.
+    return parsed.filter(
+      (m) =>
+        m &&
+        typeof m.id === "string" &&
+        (m.role === "user" || m.role === "assistant") &&
+        typeof m.content === "string"
+    );
+  } catch {
+    return [];
+  }
+}
+
+function saveStoredMessages(messages: Message[]): void {
+  if (typeof window === "undefined") return;
+  try {
+    const trimmed = messages.slice(-MAX_PERSISTED);
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(trimmed));
+  } catch {
+    // Quota exceeded or storage disabled — silently skip.
+  }
+}
+
+function clearStoredMessages(): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.removeItem(STORAGE_KEY);
+  } catch {
+    // ignore
+  }
+}
+
+// ============================================
+// Citation link — replaces ReactMarkdown's default `<a>` rendering for
+// `[N]` markers. Provides:
+//   - Hover popover with case name, court, year, and a 240-char excerpt
+//   - Click → jump to source card (expands the source panel if collapsed,
+//     scrolls into view, briefly highlights via :target)
+// ============================================
+
+interface CitationLinkProps {
+  href: string;
+  children: React.ReactNode;
+  source: VaquillSource | undefined;
+  onJump: () => void;
+}
+
+// Popover dimensions used for viewport-edge clamping. Must match the
+// CSS `.cite-popover` width / approximate height — the JS pre-computes
+// position so the popover never spills off-screen.
+const CITE_POPOVER_WIDTH = 320;
+const CITE_POPOVER_VPAD = 16;
+
+function CitationLink({ href, children, source, onJump }: CitationLinkProps) {
+  const wrapRef = useRef<HTMLSpanElement>(null);
+  const [hovered, setHovered] = useState(false);
+  const [coords, setCoords] = useState<{ left: number; top: number } | null>(null);
+  const [mounted, setMounted] = useState(false);
+
+  // Mount flag so the portal isn't attempted during SSR (the parent
+  // already runs ssr:false but we keep this defensive).
+  useEffect(() => {
+    setMounted(true);
+  }, []);
+
+  const showPopover = useCallback(() => {
+    const el = wrapRef.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    // Anchor: just above the link, horizontally centred — but clamp so
+    // the 320px-wide popover stays fully inside the viewport.
+    const half = CITE_POPOVER_WIDTH / 2;
+    const minX = CITE_POPOVER_VPAD + half;
+    const maxX = window.innerWidth - CITE_POPOVER_VPAD - half;
+    const wantedX = r.left + r.width / 2;
+    const left = Math.max(minX, Math.min(maxX, wantedX));
+    const top = r.top - 8; // 8px gap above the link
+    setCoords({ left, top });
+    setHovered(true);
+  }, []);
+
+  const hidePopover = useCallback(() => {
+    setHovered(false);
+  }, []);
+
+  if (!source) {
+    // Orphan marker (no matching source). Render as plain text so users
+    // don't click into a broken anchor.
+    return <span className="cite-link cite-link--orphan">{children}</span>;
+  }
+
+  return (
+    <>
+      <span
+        ref={wrapRef}
+        className="cite-link-wrap"
+        onMouseEnter={showPopover}
+        onMouseLeave={hidePopover}
+        onFocus={showPopover}
+        onBlur={hidePopover}
+      >
+        <a
+          href={href}
+          className="cite-link"
+          onClick={(e) => {
+            e.preventDefault();
+            onJump();
+          }}
+        >
+          {children}
+        </a>
+      </span>
+      {mounted && hovered && coords &&
+        createPortal(
+          <span
+            className="cite-popover"
+            role="tooltip"
+            style={{ left: coords.left, top: coords.top }}
+          >
+            <span className="cite-popover-title">
+              {source.caseName ?? source.citation ?? "Untitled source"}
+            </span>
+            {(source.court || source.year) && (
+              <span className="cite-popover-meta">
+                {source.court}
+                {source.court && source.year ? " · " : ""}
+                {source.year ?? ""}
+              </span>
+            )}
+            {source.excerpt && (
+              <span className="cite-popover-excerpt">
+                “{source.excerpt.length > 240 ? source.excerpt.slice(0, 240) + "…" : source.excerpt}”
+              </span>
+            )}
+          </span>,
+          document.body
+        )}
+    </>
+  );
+}
+
+// ============================================
+// Assistant body — memoised so already-completed messages don't re-parse
+// markdown when a NEW message is streaming. Re-renders only when its own
+// content / sources / id / onJump callback change.
+// ============================================
+
+interface AssistantBodyProps {
+  msgId: string;
+  content: string;
+  sources: VaquillSource[] | undefined;
+  onJumpToSource: (msgId: string, sourceIndex: number) => void;
+}
+
+const AssistantBody = memo(function AssistantBody({
+  msgId,
+  content,
+  sources,
+  onJumpToSource,
+}: AssistantBodyProps) {
+  const sourceMap = new Map<number, VaquillSource>();
+  (sources ?? []).forEach((s) => sourceMap.set(s.sourceIndex, s));
+
+  const text =
+    sources && sources.length > 0
+      ? linkifyCitations(content, msgId, new Set(sourceMap.keys()))
+      : content;
+
+  const anchorPrefix = `#src-${msgId}-`;
+
+  return (
+    <div className="message-markdown">
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm, remarkBreaks]}
+        components={{
+          a: ({ href, children, ...rest }) => {
+            if (typeof href === "string" && href.startsWith(anchorPrefix)) {
+              const n = Number(href.slice(anchorPrefix.length));
+              const src = Number.isFinite(n) ? sourceMap.get(n) : undefined;
+              return (
+                <CitationLink
+                  href={href}
+                  source={src}
+                  onJump={() => onJumpToSource(msgId, n)}
+                >
+                  {children}
+                </CitationLink>
+              );
+            }
+            // External markdown links — open in new tab for safety.
+            return (
+              <a href={href} target="_blank" rel="noopener noreferrer" {...rest}>
+                {children}
+              </a>
+            );
+          },
+        }}
+      >
+        {text}
+      </ReactMarkdown>
+    </div>
+  );
+});
 
 // ============================================
 // ChatWidget
@@ -78,30 +513,74 @@ function SourceCard({ source }: { source: VaquillSource }) {
 
 export default function ChatWidget({
   agentName = UI_CONFIG.agentName,
-  defaultMode = VAQUILL_CONFIG.defaultMode,
   exampleQuestions = [],
-  ttsEnabled = false,
-  sttEnabled = false,
+  embedded = false,
 }: ChatWidgetProps) {
-  const [messages, setMessages] = useState<Message[]>([]);
+  // Hydrate from localStorage on mount. We start with [] for SSR safety
+  // (the widget already runs ssr:false but useState's initialiser fires on
+  // first client render — reading localStorage there is fine). We keep
+  // the empty initial value so the empty-state flash doesn't happen
+  // before hydration on slow devices.
+  const [messages, setMessages] = useState<Message[]>(() => loadStoredMessages());
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
-  const [mode, setMode] = useState<VaquillMode>(defaultMode);
   const [expandedSources, setExpandedSources] = useState<Set<string>>(new Set());
   const [copiedId, setCopiedId] = useState<string | null>(null);
-  const [isRecording, setIsRecording] = useState(false);
-  const [isTranscribing, setIsTranscribing] = useState(false);
+
+  // Persist messages whenever they change. Skipped while streaming would
+  // be nice (less write churn) but real-world chats are short enough that
+  // per-update writes are imperceptible — and we get instant resume on
+  // refresh-mid-answer.
+  useEffect(() => {
+    saveStoredMessages(messages);
+  }, [messages]);
+
+  const handleNewChat = useCallback(() => {
+    setMessages([]);
+    setExpandedSources(new Set());
+    clearStoredMessages();
+  }, []);
+
+  // The floating embed.js header has a "New chat" button. It posts a
+  // message to the iframe; we listen here and clear state. Same-origin
+  // only — we trust nothing else.
+  useEffect(() => {
+    const onMessage = (e: MessageEvent) => {
+      if (e.origin !== window.location.origin) return;
+      if (e.data?.type === "vaquill:new-chat") handleNewChat();
+    };
+    window.addEventListener("message", onMessage);
+    return () => window.removeEventListener("message", onMessage);
+  }, [handleNewChat]);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  const audioChunksRef = useRef<Blob[]>([]);
+  // True while the user is parked near the bottom (so we follow new tokens).
+  // Flips false the moment they scroll up to read — we then leave them alone.
+  const stickToBottomRef = useRef(true);
 
-  const { status: ttsStatus, play: playTTS, stop: stopTTS, currentMessageId: ttsMsgId } = useTTS();
-
-  // Scroll to bottom when messages change
+  // Track whether the user is at the bottom of the scroll container.
+  // Threshold of 64px tolerates fractional pixels + the "near enough" feel
+  // every chat app uses (Slack, ChatGPT). When they scroll up to read,
+  // we stop auto-scrolling entirely.
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    const el = messagesContainerRef.current;
+    if (!el) return;
+    const onScroll = () => {
+      const distance = el.scrollHeight - (el.scrollTop + el.clientHeight);
+      stickToBottomRef.current = distance < 64;
+    };
+    el.addEventListener("scroll", onScroll, { passive: true });
+    return () => el.removeEventListener("scroll", onScroll);
+  }, []);
+
+  // Auto-follow new content only when user is near the bottom.
+  // We use `behavior: "auto"` (instant) during streaming so each token
+  // doesn't queue a smooth-scroll animation that fights the cursor.
+  useEffect(() => {
+    if (!stickToBottomRef.current) return;
+    messagesEndRef.current?.scrollIntoView({ behavior: "auto", block: "end" });
   }, [messages]);
 
   // Auto-resize textarea
@@ -140,59 +619,130 @@ export default function ChatWidget({
     setMessages((prev) => [...prev, userMsg]);
     setInput("");
     setIsLoading(true);
+    // New message — re-stick to bottom for the assistant's reply.
+    stickToBottomRef.current = true;
 
     // Snapshot history BEFORE adding this message (API expects prior turns)
     const chatHistory = buildChatHistory();
 
+    const assistantId = `asst-${Date.now()}`;
+
+    // Buffer SSE tokens and flush at most once per animation frame so we
+    // re-render the markdown tree ~60×/sec instead of once per character.
+    let pending = "";
+    let flushScheduled = false;
+    const flush = () => {
+      flushScheduled = false;
+      if (!pending) return;
+      const chunk = pending;
+      pending = "";
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === assistantId ? { ...m, content: m.content + chunk } : m
+        )
+      );
+    };
+    const scheduleFlush = () => {
+      if (flushScheduled) return;
+      flushScheduled = true;
+      requestAnimationFrame(flush);
+    };
+
     try {
-      const res = await fetch("/api/chat", {
+      const res = await fetch("/api/chat/stream", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          question: trimmed,
-          mode,
-          chatHistory,
-        }),
+        body: JSON.stringify({ question: trimmed, chatHistory }),
       });
 
-      if (!res.ok) {
+      if (!res.ok || !res.body) {
         const err = await res.json().catch(() => ({ error: "Request failed" }));
         throw new Error(err.error ?? `HTTP ${res.status}`);
       }
 
-      const data = await res.json();
-
-      // Create assistant message with empty content first
-      const assistantId = `asst-${Date.now()}`;
-      const assistantMsg: Message = {
-        id: assistantId,
-        role: "assistant",
-        content: "",
-        timestamp: Date.now(),
-        sources: data.sources ?? [],
-        questionInterpreted: data.questionInterpreted,
-        mode: data.mode,
-      };
-
-      setMessages((prev) => [...prev, assistantMsg]);
+      // Insert empty assistant bubble; the loading dots disappear once
+      // the first chunk lands.
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: assistantId,
+          role: "assistant",
+          content: "",
+          timestamp: Date.now(),
+          sources: [],
+        },
+      ]);
       setIsLoading(false);
 
-      // Word-by-word animation
-      const words = (data.answer as string).split(" ");
-      let accumulated = "";
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let finalSources: VaquillSource[] = [];
+      let finalQuestionInterpreted: string | undefined;
 
-      for (let i = 0; i < words.length; i++) {
-        accumulated += (i === 0 ? "" : " ") + words[i];
-        const snapshot = accumulated;
-        setMessages((prev) =>
-          prev.map((m) =>
-            m.id === assistantId ? { ...m, content: snapshot } : m
-          )
-        );
-        await new Promise((resolve) =>
-          setTimeout(resolve, UI_CONFIG.wordAnimationDelayMs)
-        );
+      // Standard SSE parser: accumulate, split on `\n`, ignore non-data lines.
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+
+        for (const line of lines) {
+          const trimmedLine = line.trim();
+          if (!trimmedLine.startsWith("data:")) continue;
+          const dataStr = trimmedLine.slice(5).trim();
+          if (!dataStr) continue;
+
+          try {
+            const event = JSON.parse(dataStr);
+            if (event.type === "chunk" && typeof event.text === "string") {
+              pending += event.text;
+              scheduleFlush();
+            } else if (event.type === "sources" && Array.isArray(event.sources)) {
+              // Sources arrive BEFORE chunks. Attach them right now so
+              // the source skeleton is visible while the answer streams
+              // — this is the "show your work" trust signal users
+              // expect from Perplexity / NotebookLM.
+              finalSources = event.sources;
+              const incoming = event.sources as VaquillSource[];
+              setMessages((prev) =>
+                prev.map((m) =>
+                  m.id === assistantId ? { ...m, sources: incoming } : m
+                )
+              );
+              // Source panel stays collapsed by default; users open it
+              // via the chip in the action row or by clicking a [N]
+              // citation marker (which auto-expands).
+            } else if (event.type === "done") {
+              finalQuestionInterpreted = event.questionInterpreted;
+            } else if (event.type === "error") {
+              throw new Error(event.error ?? "Stream error");
+            }
+          } catch {
+            // Malformed SSE line — skip
+          }
+        }
       }
+
+      // One final synchronous flush so any tail chunk lands before we
+      // finalise the message. Sources were already attached when their
+      // SSE event arrived; here we just record questionInterpreted and
+      // ensure sources are correct (in case the stream missed the
+      // pre-stream `sources` event for any reason).
+      flush();
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === assistantId
+            ? {
+                ...m,
+                sources: m.sources?.length ? m.sources : finalSources,
+                questionInterpreted: finalQuestionInterpreted,
+              }
+            : m
+        )
+      );
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : "Something went wrong";
       console.error("[ChatWidget] send error:", message);
@@ -207,7 +757,7 @@ export default function ChatWidget({
       ]);
       setIsLoading(false);
     }
-  }, [input, isLoading, mode, buildChatHistory]);
+  }, [input, isLoading, buildChatHistory]);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -230,6 +780,39 @@ export default function ChatWidget({
     });
   };
 
+  // Click-quote-to-jump — clicking a `[N]` marker:
+  //   1. Expands the source panel for that message if collapsed.
+  //   2. Updates the URL hash to the matching card so :target highlights.
+  //   3. Scrolls the card into view inside the chat scroll container.
+  const handleJumpToSource = useCallback(
+    (msgId: string, sourceIndex: number) => {
+      setExpandedSources((prev) => {
+        if (prev.has(msgId)) return prev;
+        const next = new Set(prev);
+        next.add(msgId);
+        return next;
+      });
+      const targetId = `src-${msgId}-${sourceIndex}`;
+      // Defer one frame so the panel is in the DOM before we scroll
+      // (when it was previously collapsed).
+      requestAnimationFrame(() => {
+        const el = document.getElementById(targetId);
+        if (!el) return;
+        // Update hash so :target rule kicks in for the highlight pulse.
+        if (typeof history !== "undefined" && history.replaceState) {
+          history.replaceState(null, "", `#${targetId}`);
+        }
+        el.scrollIntoView({ behavior: "smooth", block: "center" });
+      });
+    },
+    []
+  );
+
+  const handleFollowUpClick = useCallback((q: string) => {
+    setInput(q);
+    textareaRef.current?.focus();
+  }, []);
+
   const copyToClipboard = async (text: string, msgId: string) => {
     try {
       await navigator.clipboard.writeText(text);
@@ -237,55 +820,6 @@ export default function ChatWidget({
       setTimeout(() => setCopiedId(null), 2000);
     } catch {
       // Clipboard API unavailable
-    }
-  };
-
-  // STT: start recording
-  const startRecording = async () => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const recorder = new MediaRecorder(stream);
-      mediaRecorderRef.current = recorder;
-      audioChunksRef.current = [];
-
-      recorder.ondataavailable = (e) => {
-        if (e.data.size > 0) audioChunksRef.current.push(e.data);
-      };
-
-      recorder.onstop = async () => {
-        const blob = new Blob(audioChunksRef.current, { type: "audio/webm" });
-        stream.getTracks().forEach((t) => t.stop());
-        await transcribeAudio(blob);
-      };
-
-      recorder.start();
-      setIsRecording(true);
-    } catch {
-      alert("Could not access microphone. Please check browser permissions.");
-    }
-  };
-
-  const stopRecording = () => {
-    if (mediaRecorderRef.current && isRecording) {
-      mediaRecorderRef.current.stop();
-      setIsRecording(false);
-    }
-  };
-
-  const transcribeAudio = async (blob: Blob) => {
-    setIsTranscribing(true);
-    try {
-      const form = new FormData();
-      form.append("audio", blob, "recording.webm");
-      const res = await fetch("/api/chat/transcribe", { method: "POST", body: form });
-      if (!res.ok) throw new Error("Transcription request failed");
-      const data = await res.json();
-      setInput(data.transcript ?? "");
-    } catch (err) {
-      console.error("[STT]", err);
-      alert("Failed to transcribe audio. Please try again.");
-    } finally {
-      setIsTranscribing(false);
     }
   };
 
@@ -297,45 +831,55 @@ export default function ChatWidget({
 
   return (
     <div className="chat-widget">
-      {/* Header */}
-      <header className="chat-header">
-        <div className="chat-header-left">
-          <div className="chat-avatar" aria-hidden="true">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} aria-hidden="true">
-              <path strokeLinecap="round" strokeLinejoin="round" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364-6.364-.707.707M6.343 17.657l-.707.707m12.728 0-.707-.707M6.343 6.343l-.707-.707M12 7a5 5 0 1 1 0 10A5 5 0 0 1 12 7z" />
-            </svg>
+      {/* Header — hidden inside the floating embed (outer window has its own) */}
+      {!embedded && (
+        <header className="chat-header">
+          <div className="chat-header-left">
+            <div className="chat-header-text">
+              <h1 className="chat-agent-name">{agentName}</h1>
+            </div>
           </div>
-          <div>
-            <h1 className="chat-agent-name">{agentName}</h1>
-            <span className="chat-status-dot" aria-label="Online" />
-          </div>
-        </div>
-        <div className="chat-header-right">
-          {/* Mode toggle */}
-          <div className="mode-toggle" role="group" aria-label="Query mode">
+          {messages.length > 0 && (
             <button
-              className={`mode-btn${mode === "standard" ? " mode-btn--active" : ""}`}
-              onClick={() => setMode("standard")}
-              title="Standard mode — fast, 18 RAG techniques"
+              type="button"
+              className="header-action-btn"
+              onClick={handleNewChat}
+              title="Start a new chat"
+              aria-label="Start a new chat"
             >
-              Standard
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth={1.8}
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden="true"
+              >
+                <path d="M12 5v14M5 12h14" />
+              </svg>
+              <span>New chat</span>
             </button>
-            <button
-              className={`mode-btn${mode === "deep" ? " mode-btn--active" : ""}`}
-              onClick={() => setMode("deep")}
-              title="Deep mode — 35 techniques, hallucination detection"
-            >
-              Deep
-            </button>
-          </div>
-        </div>
-      </header>
+          )}
+        </header>
+      )}
 
       {/* Messages */}
-      <div className="chat-messages" role="log" aria-live="polite" aria-label="Chat messages">
+      <div
+        className="chat-messages"
+        role="log"
+        aria-live="polite"
+        aria-label="Chat messages"
+        ref={messagesContainerRef}
+      >
         {isEmpty && (
           <div className="chat-empty">
             <p className="chat-empty-title">Ask any legal question</p>
+            <p className="legal-disclaimer legal-disclaimer--banner">
+              This is legal information, not legal advice. Always verify
+              cited sources and consult a licensed attorney for advice on
+              your specific situation.
+            </p>
             {exampleQuestions.length > 0 && (
               <div className="example-questions">
                 {exampleQuestions.map((q) => (
@@ -356,78 +900,87 @@ export default function ChatWidget({
           <div key={msg.id} className={`message message--${msg.role}`}>
             <div className={`message-bubble message-bubble--${msg.role}`}>
               {msg.role === "assistant" ? (
-                <div className="message-markdown">
-                  <ReactMarkdown remarkPlugins={[remarkGfm, remarkBreaks]}>
-                    {msg.content}
-                  </ReactMarkdown>
-                </div>
+                <AssistantBody
+                  msgId={msg.id}
+                  content={msg.content}
+                  sources={msg.sources}
+                  onJumpToSource={handleJumpToSource}
+                />
               ) : (
                 <p className="message-text">{msg.content}</p>
               )}
             </div>
 
             {/* Assistant message actions */}
-            {msg.role === "assistant" && msg.content && (
-              <div className="message-actions">
-                {/* Copy */}
-                <button
-                  className="action-btn"
-                  onClick={() => copyToClipboard(msg.content, msg.id)}
-                  title="Copy response"
-                  aria-label="Copy response"
-                >
-                  {copiedId === msg.id ? (
-                    <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-                      <path fillRule="evenodd" d="M16.707 5.293a1 1 0 00-1.414 0L8 12.586 4.707 9.293a1 1 0 00-1.414 1.414l4 4a1 1 0 001.414 0l8-8a1 1 0 000-1.414z" clipRule="evenodd" />
-                    </svg>
-                  ) : (
-                    <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-                      <path d="M8 2a1 1 0 000 2h2a1 1 0 100-2H8z" />
-                      <path d="M3 5a2 2 0 012-2 3 3 0 003 3h2a3 3 0 003-3 2 2 0 012 2v6h-4.586l1.293-1.293a1 1 0 00-1.414-1.414l-3 3a1 1 0 000 1.414l3 3a1 1 0 001.414-1.414L10.414 13H15v3a2 2 0 01-2 2H5a2 2 0 01-2-2V5z" />
-                    </svg>
-                  )}
-                </button>
-
-                {/* TTS */}
-                {ttsEnabled && (
+            {msg.role === "assistant" && msg.content && (() => {
+              const verification = verifyCitations(msg.content, msg.sources);
+              return (
+                <div className="message-actions">
+                  {/* Copy */}
                   <button
                     className="action-btn"
-                    onClick={() =>
-                      ttsMsgId === msg.id
-                        ? stopTTS()
-                        : playTTS(msg.content, msg.id)
-                    }
-                    title={ttsMsgId === msg.id ? "Stop playback" : "Read aloud"}
-                    aria-label={ttsMsgId === msg.id ? "Stop playback" : "Read aloud"}
+                    onClick={() => copyToClipboard(msg.content, msg.id)}
+                    title="Copy response"
+                    aria-label="Copy response"
                   >
-                    {ttsMsgId === msg.id && ttsStatus === "playing" ? (
+                    {copiedId === msg.id ? (
                       <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-                        <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8 7a1 1 0 00-1 1v4a1 1 0 002 0V8a1 1 0 00-1-1zm4 0a1 1 0 00-1 1v4a1 1 0 002 0V8a1 1 0 00-1-1z" clipRule="evenodd" />
+                        <path fillRule="evenodd" d="M16.707 5.293a1 1 0 00-1.414 0L8 12.586 4.707 9.293a1 1 0 00-1.414 1.414l4 4a1 1 0 001.414 0l8-8a1 1 0 000-1.414z" clipRule="evenodd" />
                       </svg>
                     ) : (
                       <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-                        <path fillRule="evenodd" d="M9.383 3.076A1 1 0 0110 4v12a1 1 0 01-1.707.707L4.586 13H2a1 1 0 01-1-1V8a1 1 0 011-1h2.586l3.707-3.707a1 1 0 011.09-.217zM14.657 2.929a1 1 0 011.414 0A9.972 9.972 0 0119 10a9.972 9.972 0 01-2.929 7.071 1 1 0 01-1.414-1.414A7.971 7.971 0 0017 10c0-2.21-.894-4.208-2.343-5.657a1 1 0 010-1.414zm-2.829 2.828a1 1 0 011.415 0A5.983 5.983 0 0115 10a5.984 5.984 0 01-1.757 4.243 1 1 0 01-1.415-1.415A3.984 3.984 0 0013 10a3.983 3.983 0 00-1.172-2.828 1 1 0 010-1.415z" clipRule="evenodd" />
+                        <path d="M8 2a1 1 0 000 2h2a1 1 0 100-2H8z" />
+                        <path d="M3 5a2 2 0 012-2 3 3 0 003 3h2a3 3 0 003-3 2 2 0 012 2v6h-4.586l1.293-1.293a1 1 0 00-1.414-1.414l-3 3a1 1 0 000 1.414l3 3a1 1 0 001.414-1.414L10.414 13H15v3a2 2 0 01-2 2H5a2 2 0 01-2-2V5z" />
                       </svg>
                     )}
                   </button>
-                )}
 
-                {/* Sources toggle */}
-                {msg.sources && msg.sources.length > 0 && (
-                  <button
-                    className="action-btn sources-toggle-btn"
-                    onClick={() => toggleSources(msg.id)}
-                    aria-expanded={expandedSources.has(msg.id)}
-                    title="Toggle sources"
-                  >
-                    <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-                      <path d="M9 4.804A7.968 7.968 0 005.5 4c-1.255 0-2.443.29-3.5.804v10A7.969 7.969 0 015.5 14c1.669 0 3.218.51 4.5 1.385A7.962 7.962 0 0114.5 14c1.255 0 2.443.29 3.5.804v-10A7.968 7.968 0 0014.5 4c-1.255 0-2.443.29-3.5.804V12a1 1 0 11-2 0V4.804z" />
-                    </svg>
-                    <span>{msg.sources.length}</span>
-                  </button>
-                )}
-              </div>
-            )}
+                  {/* Citation-verified badge — green check when every
+                      [N] in the answer resolves to a real source. Amber
+                      when one or more citations are orphans. Hidden
+                      until the stream finishes (verification needs the
+                      complete answer + complete source list). */}
+                  {!isLoading && verification.total > 0 && (
+                    verification.allGrounded ? (
+                      <span
+                        className="cite-verified cite-verified--ok"
+                        title={`All ${verification.total} citations resolve to a source in the database.`}
+                      >
+                        <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                          <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
+                        </svg>
+                        <span>Verified · {verification.total}</span>
+                      </span>
+                    ) : (
+                      <span
+                        className="cite-verified cite-verified--warn"
+                        title={`${verification.matched} of ${verification.total} citations matched a source. The rest could not be verified.`}
+                      >
+                        <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                          <path fillRule="evenodd" d="M8.485 2.495c.673-1.167 2.357-1.167 3.03 0l6.28 10.875c.673 1.167-.17 2.625-1.516 2.625H3.72c-1.347 0-2.189-1.458-1.515-2.625L8.485 2.495zM10 6a.75.75 0 01.75.75v3.5a.75.75 0 01-1.5 0v-3.5A.75.75 0 0110 6zm0 9a1 1 0 100-2 1 1 0 000 2z" clipRule="evenodd" />
+                        </svg>
+                        <span>{verification.matched}/{verification.total} verified</span>
+                      </span>
+                    )
+                  )}
+
+                  {/* Sources toggle */}
+                  {msg.sources && msg.sources.length > 0 && (
+                    <button
+                      className="action-btn sources-toggle-btn"
+                      onClick={() => toggleSources(msg.id)}
+                      aria-expanded={expandedSources.has(msg.id)}
+                      title="Toggle sources"
+                    >
+                      <svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                        <path d="M9 4.804A7.968 7.968 0 005.5 4c-1.255 0-2.443.29-3.5.804v10A7.969 7.969 0 015.5 14c1.669 0 3.218.51 4.5 1.385A7.962 7.962 0 0114.5 14c1.255 0 2.443.29 3.5.804v-10A7.968 7.968 0 0014.5 4c-1.255 0-2.443.29-3.5.804V12a1 1 0 11-2 0V4.804z" />
+                      </svg>
+                      <span>{msg.sources.length}</span>
+                    </button>
+                  )}
+                </div>
+              );
+            })()}
 
             {/* Sources panel */}
             {msg.role === "assistant" &&
@@ -440,9 +993,33 @@ export default function ChatWidget({
                   </p>
                   <div className="sources-list">
                     {msg.sources.map((src, idx) => (
-                      <SourceCard key={`${msg.id}-src-${idx}`} source={src} />
+                      <SourceCard
+                        key={`${msg.id}-src-${idx}`}
+                        source={src}
+                        msgId={msg.id}
+                      />
                     ))}
                   </div>
+                </div>
+              )}
+
+            {/* Suggested follow-ups — only under the most recent
+                assistant message, only when the stream is finished. */}
+            {msg.role === "assistant" &&
+              !isLoading &&
+              msg.content &&
+              msg.id === messages[messages.length - 1]?.id && (
+                <div className="follow-ups" role="group" aria-label="Suggested follow-ups">
+                  {FOLLOW_UPS.map((q) => (
+                    <button
+                      key={q}
+                      type="button"
+                      className="follow-up-chip"
+                      onClick={() => handleFollowUpClick(q)}
+                    >
+                      {q}
+                    </button>
+                  ))}
                 </div>
               )}
           </div>
@@ -473,32 +1050,9 @@ export default function ChatWidget({
             onKeyDown={handleKeyDown}
             placeholder="Ask a legal question…"
             rows={1}
-            disabled={isLoading}
             aria-label="Message input"
           />
           <div className="chat-input-actions">
-            {/* STT mic button */}
-            {sttEnabled && (
-              <button
-                className={`input-action-btn${isRecording ? " input-action-btn--recording" : ""}`}
-                onClick={isRecording ? stopRecording : startRecording}
-                disabled={isTranscribing || isLoading}
-                title={isRecording ? "Stop recording" : "Start voice input"}
-                aria-label={isRecording ? "Stop recording" : "Start voice input"}
-              >
-                {isTranscribing ? (
-                  <svg className="animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} aria-hidden="true">
-                    <circle cx="12" cy="12" r="10" strokeOpacity="0.25" />
-                    <path d="M12 2a10 10 0 0 1 10 10" />
-                  </svg>
-                ) : (
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} aria-hidden="true">
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M12 18.75a6 6 0 0 0 6-6v-1.5m-6 7.5a6 6 0 0 1-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15.75a3 3 0 0 1-3-3V4.5a3 3 0 1 1 6 0v8.25a3 3 0 0 1-3 3z" />
-                  </svg>
-                )}
-              </button>
-            )}
-
             {/* Send button */}
             <button
               className="send-btn"
@@ -512,8 +1066,8 @@ export default function ChatWidget({
             </button>
           </div>
         </div>
-        <p className="chat-disclaimer">
-          Vaquill may make mistakes. Always verify with primary sources.
+        <p className="legal-disclaimer legal-disclaimer--footer">
+          Information only, not legal advice. Verify all citations.
         </p>
       </div>
     </div>

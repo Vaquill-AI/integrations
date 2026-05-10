@@ -1,60 +1,73 @@
 /**
  * Vaquill Widget — Design Tokens
  *
- * All components reference these custom properties.
- * Light theme overrides are applied via [data-theme="light"].
+ * Mirrors the main Vaquill app:
+ *   - Warm cream background (#f4f1ec)
+ *   - Deep maroon primary (#6e3730)
+ *   - Warm near-black text (#25211d)
+ *   - Inter (sans) for body, Fraunces (serif) for headings
+ *   - 8px base radius
+ *
+ * White theme only — no dark variant.
  */
 
 :root {
   /* Brand */
-  --color-primary: #7c3aed;
-  --color-primary-hover: #6d28d9;
-  --color-primary-active: #5b21b6;
-  --color-primary-light: rgba(124, 58, 237, 0.15);
-  --color-primary-lighter: rgba(124, 58, 237, 0.07);
+  --color-primary: #6e3730;
+  --color-primary-hover: #5a2d27;
+  --color-primary-active: #4a2520;
+  --color-primary-light: rgba(110, 55, 48, 0.1);
+  --color-primary-lighter: rgba(110, 55, 48, 0.05);
 
-  /* Neutrals */
-  --color-gray-50: #f9fafb;
-  --color-gray-100: #f3f4f6;
-  --color-gray-200: #e5e7eb;
-  --color-gray-300: #d1d5db;
-  --color-gray-400: #9ca3af;
-  --color-gray-500: #6b7280;
-  --color-gray-600: #4b5563;
-  --color-gray-700: #374151;
-  --color-gray-800: #1f2937;
-  --color-gray-900: #111827;
+  /* Neutrals (warm-tinted) */
+  --color-gray-50: #faf8f5;
+  --color-gray-100: #f4f1ec;
+  --color-gray-200: #e8e4de;
+  --color-gray-300: #d4cec5;
+  --color-gray-400: #a8a097;
+  --color-gray-500: #655d54;
+  --color-gray-600: #4a443d;
+  --color-gray-700: #34302a;
+  --color-gray-800: #25211d;
+  --color-gray-900: #1a1714;
 
   /* State */
-  --color-success: #10b981;
-  --color-error: #ef4444;
-  --color-warning: #f59e0b;
+  --color-success: #4a7c59;
+  --color-error: #b85450;
+  --color-warning: #c08a3e;
 
-  /* Dark theme surfaces (default) */
-  --bg-app: #0f172a;
-  --bg-surface: #1e293b;
-  --bg-surface-alt: #334155;
-  --bg-elevated: rgba(255, 255, 255, 0.05);
-  --bg-overlay: rgba(0, 0, 0, 0.5);
+  /* Surfaces */
+  --bg-app: #f4f1ec;
+  --bg-surface: #ffffff;
+  --bg-surface-alt: #faf8f5;
+  --bg-elevated: #faf8f5;
+  --bg-overlay: rgba(37, 33, 29, 0.4);
 
-  /* Dark theme text */
-  --text-primary: #f1f5f9;
-  --text-secondary: #cbd5e1;
-  --text-muted: #64748b;
+  /* Text */
+  --text-primary: #25211d;
+  --text-secondary: #4a443d;
+  --text-muted: #655d54;
   --text-on-primary: #ffffff;
 
   /* Borders */
-  --border-default: rgba(255, 255, 255, 0.08);
+  --border-default: rgba(37, 33, 29, 0.08);
+  --border-strong: rgba(37, 33, 29, 0.16);
   --border-accent: var(--color-primary);
 
-  /* Typography */
-  --font-sans: "Inter", system-ui, -apple-system, sans-serif;
-  --font-mono: "JetBrains Mono", "Fira Code", monospace;
+  /* Typography — populated by next/font in layout.tsx */
+  --font-sans:
+    var(--font-inter), -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+  --font-serif:
+    var(--font-fraunces), Georgia, "Times New Roman", serif;
+  --font-mono:
+    "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
 
   --text-xs: 0.75rem;
   --text-sm: 0.875rem;
-  --text-base: 1rem;
-  --text-lg: 1.125rem;
+  --text-base: 0.9375rem;
+  --text-lg: 1.0625rem;
+  --text-xl: 1.25rem;
 
   /* Spacing */
   --space-1: 0.25rem;
@@ -64,34 +77,19 @@
   --space-5: 1.25rem;
   --space-6: 1.5rem;
 
-  /* Radius */
-  --radius-sm: 0.375rem;
-  --radius-md: 0.5rem;
-  --radius-lg: 0.75rem;
-  --radius-xl: 1rem;
+  /* Radius (8px base, mirroring main app) */
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
   --radius-full: 9999px;
 
-  /* Shadows */
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
-  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.4);
-  --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.5);
+  /* Shadows (subtle, warm) */
+  --shadow-sm: 0 1px 2px rgba(37, 33, 29, 0.06);
+  --shadow-md: 0 2px 8px rgba(37, 33, 29, 0.08);
+  --shadow-lg: 0 8px 24px rgba(37, 33, 29, 0.12);
 
   /* Transitions */
   --transition-fast: 150ms ease;
   --transition-base: 250ms ease;
-}
-
-/* Light theme overrides */
-[data-theme="light"] {
-  --bg-app: #f8fafc;
-  --bg-surface: #ffffff;
-  --bg-surface-alt: #f1f5f9;
-  --bg-elevated: rgba(0, 0, 0, 0.03);
-  --bg-overlay: rgba(0, 0, 0, 0.15);
-
-  --text-primary: #0f172a;
-  --text-secondary: #334155;
-  --text-muted: #94a3b8;
-
-  --border-default: rgba(0, 0, 0, 0.1);
 }

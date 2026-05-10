@@ -78,6 +78,35 @@ body {
   display: flex;
   align-items: center;
   gap: var(--space-3);
+  min-width: 0;
+}
+
+.header-action-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-1) var(--space-3);
+  font-size: var(--text-xs);
+  font-weight: 500;
+  color: var(--text-secondary);
+  background: transparent;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-full);
+  cursor: pointer;
+  transition: background var(--transition-fast), border-color var(--transition-fast),
+    color var(--transition-fast);
+  flex-shrink: 0;
+}
+
+.header-action-btn:hover {
+  background: var(--bg-surface-alt);
+  border-color: var(--border-strong);
+  color: var(--text-primary);
+}
+
+.header-action-btn svg {
+  width: 14px;
+  height: 14px;
 }
 
 .chat-avatar {
@@ -98,8 +127,10 @@ body {
 }
 
 .chat-agent-name {
-  font-size: var(--text-base);
-  font-weight: 600;
+  font-family: var(--font-serif);
+  font-size: var(--text-lg);
+  font-weight: 500;
+  letter-spacing: -0.01em;
   color: var(--text-primary);
   line-height: 1.2;
 }
@@ -148,11 +179,30 @@ body {
 .chat-messages {
   flex: 1;
   overflow-y: auto;
+  overflow-x: hidden;
   padding: var(--space-5);
   display: flex;
   flex-direction: column;
   gap: var(--space-4);
   scroll-behavior: smooth;
+  min-width: 0;
+}
+
+/* Anything inside a message bubble (long URLs, code, source cards)
+   must not push the bubble wider than its container — that's what was
+   creating the stray horizontal scrollbar above the input. */
+.message,
+.message-bubble,
+.message-markdown,
+.sources-panel {
+  max-width: 100%;
+  min-width: 0;
+}
+
+.message-markdown pre,
+.message-markdown code {
+  max-width: 100%;
+  overflow-x: auto;
 }
 
 .chat-empty {
@@ -166,9 +216,12 @@ body {
 }
 
 .chat-empty-title {
-  font-size: var(--text-base);
-  color: var(--text-muted);
-  margin-bottom: var(--space-4);
+  font-family: var(--font-serif);
+  font-size: var(--text-xl);
+  font-weight: 400;
+  letter-spacing: -0.01em;
+  color: var(--text-secondary);
+  margin-bottom: var(--space-5);
 }
 
 .example-questions {
@@ -217,9 +270,11 @@ body {
 .message-bubble {
   padding: var(--space-3) var(--space-4);
   border-radius: var(--radius-lg);
-  font-size: var(--text-sm);
-  line-height: 1.7;
+  font-size: 13px;
+  line-height: 1.65;
   word-break: break-word;
+  text-align: justify;
+  hyphens: auto;
 }
 
 .message-bubble--user {
@@ -407,18 +462,244 @@ body {
 }
 
 .source-card {
+  position: relative;
+  padding: var(--space-3);
+  padding-right: 36px; /* leave room for the corner index pill */
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  /* Compensate for sticky-ish chat header when an inline [N] anchor jumps here. */
+  scroll-margin-top: var(--space-4);
+}
+
+.source-card:target {
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 2px var(--color-primary-light);
+}
+
+.source-card-header {
+  margin-bottom: var(--space-1);
+  min-width: 0;
+}
+
+.source-card-header .source-case-name {
+  display: block;
+  min-width: 0;
+}
+
+/* Top-right corner pill — small, unobtrusive, doesn't fight the title */
+.source-index {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 6px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--color-primary);
+  background: var(--color-primary-light);
+  border-radius: var(--radius-full);
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+.source-badge {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: var(--radius-full);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  flex-shrink: 0;
+}
+
+.source-badge--statute {
+  background: rgba(99, 102, 241, 0.12);
+  color: rgb(99, 102, 241);
+}
+
+.source-meta--secondary {
+  margin-top: -2px;
+  margin-bottom: var(--space-2);
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.source-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  align-items: center;
+}
+
+.source-pdf-link--primary {
+  font-weight: 600;
+}
+
+/* Inline [N] citation links inside the answer body. The wrapper
+   holds the popover; the link itself is the visible chip. */
+.cite-link-wrap {
+  position: relative;
+  display: inline-block;
+  white-space: nowrap;
+}
+
+.cite-link {
+  font-weight: 600;
+  color: var(--color-primary);
+  text-decoration: none;
+  font-variant-numeric: tabular-nums;
+  padding: 0 1px;
+  cursor: pointer;
+}
+
+.cite-link:hover,
+.cite-link:focus-visible {
+  text-decoration: underline;
+}
+
+.cite-link--orphan {
+  color: var(--text-muted);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Hover popover — portalled to <body> with `position: fixed` so it
+   escapes the chat container's overflow:hidden clipping. The link
+   provides `top` and `left` inline; this rule supplies size + style.
+   Width must match `CITE_POPOVER_WIDTH` in ChatWidget.tsx. */
+.cite-popover {
+  position: fixed;
+  width: 320px;
+  max-width: calc(100vw - 32px);
+  /* JS gives us the link's top edge; transform shifts the popover to
+     sit ABOVE the link with its bottom edge anchored to that point. */
+  transform: translate(-50%, -100%);
   padding: var(--space-3);
   background: var(--bg-surface);
   border: 1px solid var(--border-default);
   border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+  color: var(--text-primary);
+  z-index: 2147483647; /* above embed.js floating window */
+  white-space: normal;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  pointer-events: none; /* purely informational */
 }
 
-.source-card-header {
-  display: flex;
+.cite-popover-title {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.cite-popover-meta {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.cite-popover-excerpt {
+  color: var(--text-secondary);
+  font-style: italic;
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* Citation-verified badge in the action row. */
+.cite-verified {
+  display: inline-flex;
   align-items: center;
-  justify-content: space-between;
+  gap: 4px;
+  font-size: 11px;
+  font-weight: 500;
+  padding: 2px 8px;
+  border-radius: var(--radius-full);
+  flex-shrink: 0;
+  cursor: default;
+}
+
+.cite-verified svg {
+  width: 12px;
+  height: 12px;
+}
+
+.cite-verified--ok {
+  color: var(--color-success);
+  background: rgba(74, 124, 89, 0.12);
+}
+
+.cite-verified--warn {
+  color: var(--color-warning);
+  background: rgba(192, 138, 62, 0.14);
+}
+
+/* Suggested follow-up chips under the latest assistant message. */
+.follow-ups {
+  display: flex;
+  flex-direction: column;
   gap: var(--space-2);
-  margin-bottom: var(--space-1);
+  margin-top: var(--space-3);
+  width: 100%;
+}
+
+.follow-up-chip {
+  text-align: left;
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: background var(--transition-fast), border-color var(--transition-fast),
+    color var(--transition-fast);
+}
+
+.follow-up-chip::before {
+  content: "→ ";
+  color: var(--color-primary);
+  font-weight: 600;
+}
+
+.follow-up-chip:hover {
+  background: var(--bg-surface-alt);
+  border-color: var(--color-primary);
+  color: var(--text-primary);
+}
+
+/* "Not legal advice" disclaimers — one banner on empty state, one
+   small footer under the input. */
+.legal-disclaimer {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+.legal-disclaimer--banner {
+  max-width: 480px;
+  margin: 0 auto var(--space-4);
+  padding: var(--space-2) var(--space-3);
+  background: var(--bg-surface-alt);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  text-align: center;
+}
+
+.legal-disclaimer--footer {
+  margin: var(--space-2) 0 0;
+  text-align: center;
+  font-size: 11px;
 }
 
 .source-case-name {
@@ -497,12 +778,12 @@ body {
 
 .chat-input-wrapper {
   display: flex;
-  align-items: flex-end;
+  align-items: center;
   gap: var(--space-2);
   background: var(--bg-elevated);
   border: 1px solid var(--border-default);
   border-radius: var(--radius-xl);
-  padding: var(--space-3) var(--space-3);
+  padding: var(--space-2) var(--space-3);
   transition: border-color var(--transition-fast);
 }
 
@@ -512,6 +793,7 @@ body {
 
 .chat-textarea {
   flex: 1;
+  min-width: 0;
   background: transparent;
   border: none;
   outline: none;
@@ -519,9 +801,12 @@ body {
   font-family: var(--font-sans);
   font-size: var(--text-sm);
   color: var(--text-primary);
-  line-height: 1.6;
+  line-height: 1.5;
+  padding: 6px 4px;
+  margin: 0;
   max-height: 200px;
   overflow-y: auto;
+  display: block;
 }
 
 .chat-textarea::placeholder {

@@ -25,16 +25,15 @@ const nextConfig: NextConfig = {
         ],
       },
       {
-        // COEP/COOP so the widget can run inside a sandboxed iframe
+        // Allow this widget to be iframed by any origin. We deliberately
+        // do NOT set X-Frame-Options or COEP=require-corp here — those
+        // would break the floating embed.js loader when used on third-
+        // party sites. CSP frame-ancestors=* is the modern equivalent.
         source: "/:path*",
         headers: [
           {
-            key: "Cross-Origin-Embedder-Policy",
-            value: "require-corp",
-          },
-          {
-            key: "Cross-Origin-Opener-Policy",
-            value: "same-origin",
+            key: "Content-Security-Policy",
+            value: "frame-ancestors *;",
           },
         ],
       },

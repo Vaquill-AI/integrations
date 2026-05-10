@@ -9,10 +9,11 @@ An embeddable AI legal research chat widget built with Next.js 15, TypeScript, a
 This widget provides a full-featured chat interface that can be deployed as a standalone page or embedded via an iframe on any website. It includes:
 
 - Word-by-word streaming animation for responses
-- Structured legal sources panel (case name, citation, court, excerpt, PDF link)
+- Inline `[N]` citation links that anchor to the matching source card
+- Structured legal sources panel: case name, citation, court, year, disposition, docket number, citation count, excerpt
+- Per-source link priority: Vaquill-hosted statute URLs (`htmlUrl` / `statutePdfUrl` / `xmlUrl`) first, then govinfo.gov, then external court PDFs
 - Standard vs Deep RAG mode toggle
-- Optional TTS playback (OpenAI tts-1)
-- Optional STT voice input (OpenAI Whisper)
+- US-only: every request is pinned to `countryCode: "US"` server-side
 - Dark / light theme via CSS custom properties
 - Embeddable in iframes with CORS headers pre-configured
 - Production-ready with standalone Next.js output and Vercel support
@@ -23,7 +24,6 @@ This widget provides a full-featured chat interface that can be deployed as a st
 
 - Node.js 18+ ([download](https://nodejs.org/))
 - A Vaquill API key (`vq_key_...`) from [app.vaquill.ai/settings/api](https://app.vaquill.ai/settings/api)
-- (Optional) OpenAI API key for TTS and STT features
 
 ---
 
@@ -57,33 +57,39 @@ Navigate to [http://localhost:3000](http://localhost:3000) to see the widget.
 
 ## Configuration
 
-Create a `.env.local` file with the following variables:
+Only the API key lives in env (it's the only secret). Everything else
+(agent name, mode, example questions, animation speed) is hardcoded in
+[`src/config/constants.ts`](src/config/constants.ts) so embedders edit
+one file and redeploy.
 
-| Variable | Required | Default | Description |
-|---|---|---|---|
-| `VAQUILL_API_KEY` | Yes | -- | Your Vaquill API key (`vq_key_...`) |
-| `VAQUILL_API_URL` | No | `https://api.vaquill.ai/api/v1` | Override the API base URL |
-| `NEXT_PUBLIC_DEFAULT_MODE` | No | `standard` | Default RAG mode: `standard` or `deep` |
-| `NEXT_PUBLIC_THEME` | No | `dark` | Widget theme: `dark` or `light` |
-| `NEXT_PUBLIC_AGENT_NAME` | No | `Vaquill Legal Assistant` | Display name shown in the chat header |
-| `OPENAI_API_KEY` | No | -- | Enables TTS and STT features |
-| `OPENAI_TTS_MODEL` | No | `tts-1` | OpenAI TTS model (`tts-1` or `tts-1-hd`) |
-| `OPENAI_TTS_VOICE` | No | `nova` | OpenAI TTS voice: alloy, echo, fable, onyx, nova, shimmer |
-| `STT_MODEL` | No | `gpt-4o-mini-transcribe` | OpenAI speech-to-text model |
-
-### Example `.env.local`
+### `.env.local`
 
 ```bash
-# Required
+# Required: your Vaquill API key (starts with vq_key_)
 VAQUILL_API_KEY=vq_key_your_key_here
+```
 
-# Optional -- TTS and STT
-OPENAI_API_KEY=sk-your-key-here
+### Customising in code
 
-# Optional -- UI
-NEXT_PUBLIC_DEFAULT_MODE=standard
-NEXT_PUBLIC_THEME=dark
-NEXT_PUBLIC_AGENT_NAME=Vaquill Legal Assistant
+Open `src/config/constants.ts`:
+
+```ts
+export const VAQUILL_CONFIG = {
+  apiBaseUrl: "https://api.vaquill.ai/api/v1",
+  defaultMode: "standard" as "standard" | "deep",  // or "deep"
+  countryCode: "US" as const,                       // US-only
+};
+
+export const UI_CONFIG = {
+  agentName: "Vaquill Legal Assistant",
+  wordAnimationDelayMs: 25,
+  textareaMaxHeightPx: 200,
+};
+
+export const EXAMPLE_QUESTIONS = [
+  "What is qualified immunity under 42 USC 1983?",
+  // …
+];
 ```
 
 ---
@@ -112,18 +118,15 @@ The Next.js app exposes the following serverless API routes:
 
 | Route | Method | Description |
 |---|---|---|
-| `/api/chat` | POST | Proxy to Vaquill `/ask` (non-streaming) |
-| `/api/chat/stream` | POST | Proxy to Vaquill `/ask/stream` (SSE) |
-| `/api/chat/transcribe` | POST | Speech-to-text via OpenAI Whisper |
-| `/api/agent/capabilities` | GET | Feature flags based on env config |
-| `/api/tts/speak` | POST | Text-to-speech via OpenAI |
+| `/api/chat` | POST | Proxy to Vaquill `/ask` (non-streaming, US-pinned) |
+| `/api/chat/stream` | POST | Proxy to Vaquill `/ask/stream` (SSE, US-pinned) |
 
 ### POST `/api/chat`
 
 **Request:**
 ```json
 {
-  "question": "What is Article 21?",
+  "question": "What is qualified immunity under 42 USC 1983?",
   "mode": "standard",
   "chatHistory": [
     { "role": "user", "content": "Previous question" },
@@ -136,20 +139,24 @@ The Next.js app exposes the following serverless API routes:
 ```json
 {
   "success": true,
-  "answer": "Article 21 of the Indian Constitution...",
+  "answer": "Qualified immunity is a defense available to government officials [1][2]...",
   "sources": [
     {
-      "caseName": "Maneka Gandhi v. Union of India",
-      "citation": "AIR 1978 SC 597",
-      "court": "Supreme Court of India",
-      "excerpt": "The right to life under Article 21...",
+      "sourceIndex": 1,
+      "caseName": "Harlow v. Fitzgerald",
+      "citation": "457 U.S. 800",
+      "court": "Supreme Court of the United States",
+      "year": 1982,
+      "sourceType": "us_case",
+      "excerpt": "Government officials performing discretionary functions generally are shielded from liability...",
       "pdfUrl": "https://...",
-      "relevanceScore": 0.92
+      "externalUrl": "https://...",
+      "relevanceScore": 0.94
     }
   ],
-  "questionInterpreted": "Explain the right to life under Article 21",
+  "questionInterpreted": "What is qualified immunity under § 1983?",
   "mode": "standard",
-  "meta": { "requestId": "...", "processingTimeMs": 1240 }
+  "meta": { "processingTimeMs": 1240, "creditsConsumed": 5 }
 }
 ```
 
@@ -169,7 +176,7 @@ npm i -g vercel
 vercel --prod
 ```
 
-Then set `VAQUILL_API_KEY` (and optionally `OPENAI_API_KEY`) in the Vercel dashboard under **Project Settings > Environment Variables**.
+Then set `VAQUILL_API_KEY` in the Vercel dashboard under **Project Settings > Environment Variables**.
 
 **Option 2: GitHub Integration**
 
@@ -195,7 +202,6 @@ Set these in your deployment platform:
 
 ```
 VAQUILL_API_KEY=vq_key_your_key_here
-OPENAI_API_KEY=sk-your-key-here     # optional, for TTS/STT
 NEXT_PUBLIC_DEFAULT_MODE=standard
 NEXT_PUBLIC_THEME=dark
 ```
@@ -259,23 +265,15 @@ src/
     globals.css                  # Global styles + Tailwind
     api/
       chat/
-        route.ts                 # POST /api/chat  ->  Vaquill /ask
-        stream/route.ts          # POST /api/chat/stream  ->  Vaquill /ask/stream (SSE)
-        transcribe/route.ts      # POST /api/chat/transcribe  ->  OpenAI Whisper
-      agent/
-        capabilities/route.ts    # GET /api/agent/capabilities
-      tts/
-        speak/route.ts           # POST /api/tts/speak  ->  OpenAI TTS
+        route.ts                 # POST /api/chat  ->  Vaquill /ask (US-pinned)
+        stream/route.ts          # POST /api/chat/stream  ->  Vaquill /ask/stream (SSE, US-pinned)
   components/
     ChatWidget.tsx               # Main chat UI component
   config/
     constants.ts                 # All env-driven config
-  hooks/
-    useCapabilities.ts           # Fetches feature flags from /api/agent/capabilities
-    useTTS.ts                    # TTS playback hook
   lib/
     vaquill.ts                   # Server-side Vaquill API client
-    markdown.ts                  # Markdown post-processing utilities
+    markdown.ts                  # Citation linkifier + markdown post-processing
   styles/
     design-tokens.css            # CSS custom properties (dark + light themes)
 ```
@@ -305,23 +303,13 @@ npm run build
 - Check the browser console and server logs for error details.
 - Test the API key directly: `curl -H "Authorization: Bearer vq_key_..." https://api.vaquill.ai/api/v1/health`
 
-**TTS not playing:**
-- Verify `OPENAI_API_KEY` is configured.
-- Check the browser console for errors.
-- Ensure the `/api/agent/capabilities` endpoint returns `ttsEnabled: true`.
-
-**STT / microphone not working:**
-- The page must be served over HTTPS (required for microphone access).
-- Grant microphone permissions when prompted by the browser.
-- Check that `OPENAI_API_KEY` is set (STT depends on it).
-
 ### Browser compatibility
 
 | Browser | Support |
 |---|---|
 | Chrome / Edge | Full support (recommended) |
 | Firefox | Full support |
-| Safari / iOS | WebM not supported; automatic fallback to MP4. Microphone requires HTTPS. |
+| Safari / iOS | Full support |
 
 ---
 
