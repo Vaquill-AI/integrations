@@ -103,7 +103,15 @@ export class VaquillClient {
   constructor(apiKey?: string, baseUrl?: string) {
     this.apiKey = apiKey ?? VAQUILL_CONFIG.apiKey;
     this.baseUrl = baseUrl ?? VAQUILL_CONFIG.apiBaseUrl;
+    // Note: we deliberately don't throw here. The module is imported
+    // by Next during `next build`'s "Collecting page data" phase, where
+    // runtime env vars (including VAQUILL_API_KEY) aren't present in
+    // most container builds. Throwing on construction would break the
+    // build. The actual key check happens lazily in `ask`/`askStream`
+    // so that real requests fail loudly while build steps stay quiet.
+  }
 
+  private ensureConfigured(): void {
     if (!this.apiKey) {
       throw new Error(
         "VAQUILL_API_KEY is not configured. Set it in your environment variables."
@@ -123,6 +131,7 @@ export class VaquillClient {
    * Send a question to the Vaquill /ask endpoint (non-streaming).
    */
   async ask(payload: VaquillAskRequest): Promise<VaquillAskResponse> {
+    this.ensureConfigured();
     const url = `${this.baseUrl}/ask`;
 
     const body: VaquillAskRequest = {
@@ -160,6 +169,7 @@ export class VaquillClient {
    * Returns the raw Response object so the caller can pipe it.
    */
   async askStream(payload: VaquillAskRequest): Promise<Response> {
+    this.ensureConfigured();
     const url = `${this.baseUrl}/ask/stream`;
 
     const body: VaquillAskRequest = {
