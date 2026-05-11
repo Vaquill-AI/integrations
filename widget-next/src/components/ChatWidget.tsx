@@ -20,6 +20,8 @@ interface Message {
   timestamp: number;
   sources?: VaquillSource[];
   questionInterpreted?: string;
+  /** LLM-generated follow-ups, fetched after the answer streams in. */
+  followUps?: string[];
 }
 
 interface ChatWidgetProps {
@@ -279,9 +281,10 @@ function verifyCitations(
   };
 }
 
-// Suggested follow-ups shown under each completed assistant message.
-// Generic legal-research prompts that work after any answer.
-const FOLLOW_UPS: readonly string[] = [
+// Fallback follow-ups used until the LLM-generated set lands (and if
+// the /api/follow-ups call fails entirely). Generic prompts that work
+// after any legal answer.
+const FALLBACK_FOLLOW_UPS: readonly string[] = [
   "Are there later cases that distinguish this holding?",
   "How have circuits split on this issue?",
   "What's the standard of review on appeal?",
@@ -526,6 +529,24 @@ export default function ChatWidget({
   const [isLoading, setIsLoading] = useState(false);
   const [expandedSources, setExpandedSources] = useState<Set<string>>(new Set());
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  // Streaming progress — shown in the empty-content assistant bubble so
+  // users know to wait during the 30-60s answer-generation window.
+  const [streamingId, setStreamingId] = useState<string | null>(null);
+  const [streamingStatus, setStreamingStatus] = useState<string>("Searching legal cases…");
+  const [streamingElapsed, setStreamingElapsed] = useState<number>(0);
+  const streamingStartedAtRef = useRef<number>(0);
+
+  // Tick a 1s timer while a message is streaming so the elapsed badge
+  // updates without re-rendering every message.
+  useEffect(() => {
+    if (!streamingId) return;
+    const id = window.setInterval(() => {
+      setStreamingElapsed(
+        Math.floor((Date.now() - streamingStartedAtRef.current) / 1000)
+      );
+    }, 1000);
+    return () => window.clearInterval(id);
+  }, [streamingId]);
 
   // Persist messages whenever they change. Skipped while streaming would
   // be nice (less write churn) but real-world chats are short enough that
@@ -538,15 +559,18 @@ export default function ChatWidget({
   const handleNewChat = useCallback(() => {
     setMessages([]);
     setExpandedSources(new Set());
+    setStreamingId(null);
     clearStoredMessages();
   }, []);
 
   // The floating embed.js header has a "New chat" button. It posts a
-  // message to the iframe; we listen here and clear state. Same-origin
-  // only — we trust nothing else.
+  // message to the iframe; we listen here and clear state. When the
+  // widget is embedded on a customer site (cross-origin parent), the
+  // message naturally arrives with a different origin than the iframe —
+  // so we authenticate on the message *shape* instead. The action (wipe
+  // local chat state) carries no sensitive data.
   useEffect(() => {
     const onMessage = (e: MessageEvent) => {
-      if (e.origin !== window.location.origin) return;
       if (e.data?.type === "vaquill:new-chat") handleNewChat();
     };
     window.addEventListener("message", onMessage);
@@ -595,13 +619,18 @@ export default function ChatWidget({
     el.style.height = `${capped}px`;
   }, [input]);
 
-  // Build chatHistory from current messages for the API
+  // Build chatHistory from current messages for the API. Empty-content
+  // messages must be filtered — the upstream Vaquill API rejects them
+  // with HTTP 422 "Invalid request parameters", and they can appear when
+  // a prior stream failed before any chunk landed.
   const buildChatHistory = useCallback(
     () =>
-      messages.map((m) => ({
-        role: m.role,
-        content: m.content,
-      })),
+      messages
+        .filter((m) => m.content.trim().length > 0)
+        .map((m) => ({
+          role: m.role,
+          content: m.content,
+        })),
     [messages]
   );
 
@@ -629,7 +658,10 @@ export default function ChatWidget({
 
     // Buffer SSE tokens and flush at most once per animation frame so we
     // re-render the markdown tree ~60×/sec instead of once per character.
+    // `accumulated` keeps the full answer for the follow-up call (which
+    // needs it after the flush has cleared `pending`).
     let pending = "";
+    let accumulated = "";
     let flushScheduled = false;
     const flush = () => {
       flushScheduled = false;
@@ -660,8 +692,8 @@ export default function ChatWidget({
         throw new Error(err.error ?? `HTTP ${res.status}`);
       }
 
-      // Insert empty assistant bubble; the loading dots disappear once
-      // the first chunk lands.
+      // Insert empty assistant bubble; the loading dots + status text
+      // stay in place until the first chunk lands.
       setMessages((prev) => [
         ...prev,
         {
@@ -673,6 +705,10 @@ export default function ChatWidget({
         },
       ]);
       setIsLoading(false);
+      streamingStartedAtRef.current = Date.now();
+      setStreamingElapsed(0);
+      setStreamingStatus("Searching legal cases…");
+      setStreamingId(assistantId);
 
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
@@ -699,7 +735,10 @@ export default function ChatWidget({
             const event = JSON.parse(dataStr);
             if (event.type === "chunk" && typeof event.text === "string") {
               pending += event.text;
+              accumulated += event.text;
               scheduleFlush();
+            } else if (event.type === "status" && typeof event.message === "string") {
+              setStreamingStatus(event.message);
             } else if (event.type === "sources" && Array.isArray(event.sources)) {
               // Sources arrive BEFORE chunks. Attach them right now so
               // the source skeleton is visible while the answer streams
@@ -732,8 +771,55 @@ export default function ChatWidget({
       // ensure sources are correct (in case the stream missed the
       // pre-stream `sources` event for any reason).
       flush();
-      setMessages((prev) =>
-        prev.map((m) =>
+      setStreamingId(null);
+
+      // Kick off LLM-generated follow-ups in the background. We don't
+      // await — the answer is already on screen, follow-ups can land a
+      // beat later. On failure the API returns the fallback list so the
+      // UI is never empty.
+      const answerForFollowUps = accumulated;
+      void (async () => {
+        try {
+          if (!answerForFollowUps.trim()) return;
+          const r = await fetch("/api/follow-ups", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ question: trimmed, answer: answerForFollowUps }),
+          });
+          if (!r.ok) return;
+          const data = (await r.json()) as { followUps?: string[] };
+          if (!Array.isArray(data.followUps) || data.followUps.length === 0) return;
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === assistantId ? { ...m, followUps: data.followUps } : m
+            )
+          );
+        } catch {
+          // Silent — fallback list will render.
+        }
+      })();
+
+      setMessages((prev) => {
+        // If the stream ended without delivering any content (upstream
+        // closed early — e.g. the non-legal-query path that fails server-
+        // side `done` validation), drop the empty placeholder and append
+        // a friendly error in its place so chatHistory never contains an
+        // empty assistant message (which would 422 on the next turn).
+        const hasContent = prev.some(
+          (m) => m.id === assistantId && m.content.trim().length > 0
+        );
+        if (!hasContent) {
+          return prev
+            .filter((m) => m.id !== assistantId)
+            .concat({
+              id: `err-${Date.now()}`,
+              role: "assistant",
+              content:
+                "I couldn't generate an answer for that. Try rephrasing as a legal-research question (e.g. about a statute, case, or doctrine).",
+              timestamp: Date.now(),
+            });
+        }
+        return prev.map((m) =>
           m.id === assistantId
             ? {
                 ...m,
@@ -741,20 +827,25 @@ export default function ChatWidget({
                 questionInterpreted: finalQuestionInterpreted,
               }
             : m
-        )
-      );
+        );
+      });
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : "Something went wrong";
       console.error("[ChatWidget] send error:", message);
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: `err-${Date.now()}`,
-          role: "assistant",
-          content: `Sorry, there was an error: ${message}. Please try again.`,
-          timestamp: Date.now(),
-        },
-      ]);
+      setStreamingId(null);
+      // Drop the empty assistant placeholder (if it was inserted) so
+      // chatHistory doesn't carry an empty-content message — upstream
+      // rejects those with HTTP 422.
+      setMessages((prev) =>
+        prev
+          .filter((m) => !(m.id === assistantId && m.content.trim().length === 0))
+          .concat({
+            id: `err-${Date.now()}`,
+            role: "assistant",
+            content: `Sorry, there was an error: ${message}. Please try again.`,
+            timestamp: Date.now(),
+          })
+      );
       setIsLoading(false);
     }
   }, [input, isLoading, buildChatHistory]);
@@ -900,12 +991,26 @@ export default function ChatWidget({
           <div key={msg.id} className={`message message--${msg.role}`}>
             <div className={`message-bubble message-bubble--${msg.role}`}>
               {msg.role === "assistant" ? (
-                <AssistantBody
-                  msgId={msg.id}
-                  content={msg.content}
-                  sources={msg.sources}
-                  onJumpToSource={handleJumpToSource}
-                />
+                msg.id === streamingId && msg.content.length === 0 ? (
+                  <div className="streaming-status" aria-live="polite">
+                    <span className="loading-dot" />
+                    <span className="loading-dot" />
+                    <span className="loading-dot" />
+                    <span className="streaming-status-text">{streamingStatus}</span>
+                    <span className="streaming-status-hint">
+                      {streamingElapsed > 0
+                        ? `${streamingElapsed}s elapsed · usually 30–60s`
+                        : "usually takes 30–60s"}
+                    </span>
+                  </div>
+                ) : (
+                  <AssistantBody
+                    msgId={msg.id}
+                    content={msg.content}
+                    sources={msg.sources}
+                    onJumpToSource={handleJumpToSource}
+                  />
+                )
               ) : (
                 <p className="message-text">{msg.content}</p>
               )}
@@ -1010,7 +1115,10 @@ export default function ChatWidget({
               msg.content &&
               msg.id === messages[messages.length - 1]?.id && (
                 <div className="follow-ups" role="group" aria-label="Suggested follow-ups">
-                  {FOLLOW_UPS.map((q) => (
+                  {(msg.followUps && msg.followUps.length > 0
+                    ? msg.followUps
+                    : FALLBACK_FOLLOW_UPS
+                  ).map((q) => (
                     <button
                       key={q}
                       type="button"

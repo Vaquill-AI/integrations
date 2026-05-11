@@ -97,6 +97,8 @@ export async function POST(request: NextRequest) {
                 // We normalise to a smaller set the client understands.
                 if (event.type === "chunk" && typeof event.content === "string") {
                   enqueue({ type: "chunk", text: event.content });
+                } else if (event.type === "thinking" && typeof event.message === "string") {
+                  enqueue({ type: "status", message: event.message });
                 } else if (event.type === "sources" && Array.isArray(event.sources)) {
                   enqueue({ type: "sources", sources: event.sources });
                 } else if (event.type === "done") {
@@ -111,7 +113,7 @@ export async function POST(request: NextRequest) {
                   controller.close();
                   return;
                 }
-                // stream_init / thinking / thinking_complete are dropped
+                // stream_init / thinking_complete are dropped
               } catch {
                 // Malformed SSE line — skip
               }
