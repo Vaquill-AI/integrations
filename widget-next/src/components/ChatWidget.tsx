@@ -22,6 +22,13 @@ interface Message {
   questionInterpreted?: string;
   /** LLM-generated follow-ups, fetched after the answer streams in. */
   followUps?: string[];
+  /**
+   * Local error placeholder (not a real assistant answer). These must
+   * never be sent back to the upstream API in chatHistory — the API has
+   * been observed to 422 on a payload polluted by repeated error
+   * placeholders.
+   */
+  isError?: boolean;
 }
 
 interface ChatWidgetProps {
@@ -619,20 +626,34 @@ export default function ChatWidget({
     el.style.height = `${capped}px`;
   }, [input]);
 
-  // Build chatHistory from current messages for the API. Empty-content
-  // messages must be filtered — the upstream Vaquill API rejects them
-  // with HTTP 422 "Invalid request parameters", and they can appear when
-  // a prior stream failed before any chunk landed.
-  const buildChatHistory = useCallback(
-    () =>
-      messages
-        .filter((m) => m.content.trim().length > 0)
-        .map((m) => ({
-          role: m.role,
-          content: m.content,
-        })),
-    [messages]
-  );
+  // Build chatHistory from current messages for the API.
+  //
+  // Filters applied (each empirically tied to an upstream 422 we hit):
+  //   1. Empty-content messages — rejected outright.
+  //   2. Error placeholders (isError === true) — these are our own
+  //      "Sorry, there was an error…" strings, not real assistant
+  //      output. Repeated error placeholders in history have been
+  //      observed to poison the next turn into 422.
+  //   3. Legacy error placeholders without the flag — match by prefix
+  //      so existing localStorage chats with poisoned history recover
+  //      on next send without requiring the user to start a new chat.
+  //   4. Cap at the last 10 turns (5 Q&A pairs). Unbounded history
+  //      growth wastes tokens and can hit upstream limits.
+  const buildChatHistory = useCallback(() => {
+    const cleaned = messages.filter((m) => {
+      if (m.content.trim().length === 0) return false;
+      if (m.isError) return false;
+      if (
+        m.role === "assistant" &&
+        m.content.startsWith("Sorry, there was an error:")
+      ) {
+        return false;
+      }
+      return true;
+    });
+    const capped = cleaned.slice(-10);
+    return capped.map((m) => ({ role: m.role, content: m.content }));
+  }, [messages]);
 
   const handleSend = useCallback(async () => {
     const trimmed = input.trim();
@@ -817,6 +838,7 @@ export default function ChatWidget({
               content:
                 "I couldn't generate an answer for that. Try rephrasing as a legal-research question (e.g. about a statute, case, or doctrine).",
               timestamp: Date.now(),
+              isError: true,
             });
         }
         return prev.map((m) =>
@@ -844,6 +866,7 @@ export default function ChatWidget({
             role: "assistant",
             content: `Sorry, there was an error: ${message}. Please try again.`,
             timestamp: Date.now(),
+            isError: true,
           })
       );
       setIsLoading(false);
