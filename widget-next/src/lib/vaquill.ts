@@ -182,20 +182,29 @@ export class VaquillClient {
       chatHistory: payload.chatHistory ?? [],
     };
 
+    const serialized = JSON.stringify(body);
     const response = await fetch(url, {
       method: "POST",
       headers: this.headers,
-      body: JSON.stringify(body),
+      body: serialized,
     });
 
     if (!response.ok) {
       let detail = `${response.status} ${response.statusText}`;
+      let rawBody = "";
       try {
-        const err = await response.json();
+        rawBody = await response.text();
+        const err = JSON.parse(rawBody);
         detail = err?.detail ?? err?.message ?? detail;
       } catch {
-        // ignore parse error
+        // upstream returned non-JSON; keep status line as detail
       }
+      console.error(
+        "[Vaquill askStream] upstream rejected. status=%d sent=%s upstream=%s",
+        response.status,
+        serialized,
+        rawBody
+      );
       throw new Error(`Vaquill API error (stream): ${detail}`);
     }
 
