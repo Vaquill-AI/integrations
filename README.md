@@ -59,14 +59,20 @@ Pre-built workflow templates for batch legal research via spreadsheets.
 
 ## MCP Servers
 
-Both MCP servers now live in their own dedicated repositories. Each ships with bring-your-own-key (BYOK) auth so you can use Vaquill's hosted endpoint with your own API key (we never see or store it).
+Both MCP servers now live in their own dedicated repositories. Each is public and ships with bring-your-own-key (BYOK) auth so you can use Vaquill's hosted endpoint with your own API key (we never see or store it). No Vaquill token is required.
 
 | Server | Repo | Hosted endpoint |
 |--------|------|-----------------|
 | **CourtListener** (US) | [Vaquill-AI/courtlistener-mcp](https://github.com/Vaquill-AI/courtlistener-mcp) | `https://courtlistener-mcp.vaquill.ai/mcp/` |
 | **CanLII** (Canada) | [Vaquill-AI/canlii-mcp](https://github.com/Vaquill-AI/canlii-mcp) | `https://canlii-mcp.vaquill.ai/mcp` |
 
-See each repo's README for client setup (Claude Desktop, Cursor, VS Code, Windsurf, etc.) and self-hosting instructions.
+**Connecting.** Clients that support custom headers (Cursor, VS Code, Claude Code) pass your key as a request header. For header-less clients such as the **Claude Desktop connector UI** and **claude.ai web**, the CanLII endpoint also accepts your key directly in the URL:
+
+```
+https://canlii-mcp.vaquill.ai/mcp?token=YOUR_CANLII_API_KEY
+```
+
+CanLII rate limits are enforced per key (2 requests/second, 1 concurrent, 5,000/day). See each repo's README for full client setup (Claude Desktop, Cursor, VS Code, Windsurf) and self-hosting instructions.
 
 ## Vaquill API
 
