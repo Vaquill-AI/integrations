@@ -4,6 +4,8 @@ Chatbots, widgets, extensions, MCP servers, and platform connectors for [Vaquill
 
 Each integration is **self-contained** — pick any one, deploy it independently.
 
+[![Discord](https://img.shields.io/badge/Discord-Join%20the%20community-5865F2?logo=discord&logoColor=white)](https://discord.gg/GQtnwxf8nQ)
+
 ## Quick Start
 
 All chatbots and widgets use the [Vaquill API](https://www.vaquill.ai/docs/api-reference/). You need a Vaquill API key (`vq_key_...`) from [vaquill.ai/dashboard](https://www.vaquill.ai/dashboard).
@@ -115,3 +117,7 @@ See the [API Reference](https://www.vaquill.ai/docs/api-reference/) for full doc
 ## License
 
 MIT. Each MCP server retains its upstream license — see individual subdirectories.
+
+## Community
+
+Questions, ideas, or want to contribute? Join the Vaquill community on [Discord](https://discord.gg/GQtnwxf8nQ).
